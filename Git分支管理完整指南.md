@@ -516,6 +516,127 @@ cd aneurysm_training_code
 ls
 ```
 
+### Q9：出現 "modified content, untracked content in submodules" 錯誤？
+
+**錯誤訊息：**
+```
+Changes not staged for commit:
+  modified:   nnResUNet (modified content, untracked content)
+```
+
+**問題診斷：**
+
+這表示 `nnResUNet` 資料夾內有 `.git` 目錄，被 Git 誤認為 **submodule（子模組）**。
+
+```powershell
+# 1. 檢查是否有 .git 目錄
+Test-Path "nnResUNet\.git"
+# 如果顯示 True，就是這個問題
+
+# 2. 確認當前狀態
+git status
+```
+
+**原因：**
+
+當您從其他 Git 倉庫複製資料夾時，如果連同 `.git` 一起複製，Git 會將其視為獨立的子倉庫。主倉庫只會記錄子倉庫的「連結」而非實際內容，導致檔案無法正常追蹤。
+
+**解決方案：將 Submodule 轉為普通資料夾**
+
+```powershell
+# 步驟 1：移除子資料夾的 .git 目錄
+Remove-Item -Path "nnResUNet\.git" -Recurse -Force
+
+# 步驟 2：從 Git 移除 submodule 記錄
+git rm --cached nnResUNet
+
+# 步驟 3：查看狀態（nnResUNet 現在顯示為未追蹤資料夾）
+git status
+
+# 步驟 4：重新加入為普通資料夾
+git add nnResUNet/
+
+# 步驟 5：查看即將提交的變更
+git status
+# 應該看到類似：
+# deleted:    nnResUNet (舊的 submodule 記錄)
+# new file:   nnResUNet/檔案1.py
+# new file:   nnResUNet/檔案2.py
+# ... (所有實際檔案)
+
+# 步驟 6：提交變更
+git commit -m "修正 nnResUNet 目錄結構：從 submodule 轉為普通資料夾"
+
+# 步驟 7：推送到 GitHub
+git push origin main
+```
+
+**完整範例：**
+
+```powershell
+# 進入專案根目錄
+cd "C:\Users\user\Desktop\nnUNet\nnResUNet-github"
+
+# 診斷問題
+Write-Output "檢查是否有 .git 子目錄..."
+Test-Path "nnResUNet\.git"
+
+# 解決問題
+Write-Output "`n步驟 1: 移除 .git"
+Remove-Item -Path "nnResUNet\.git" -Recurse -Force
+
+Write-Output "`n步驟 2: 移除 submodule 記錄"
+git rm --cached nnResUNet
+
+Write-Output "`n步驟 3: 重新加入資料夾"
+git add nnResUNet/
+
+Write-Output "`n步驟 4: 查看變更"
+git status
+
+Write-Output "`n步驟 5: 提交變更"
+git commit -m "修正 nnResUNet：從 submodule 轉為普通資料夾
+
+- 移除 nnResUNet/.git 子倉庫
+- 重新加入 nnResUNet/ 作為專案的一部分
+- 完整追蹤所有程式碼和文件"
+
+Write-Output "`n步驟 6: 推送到 GitHub"
+git push origin main
+
+Write-Output "`n✅ 完成！"
+```
+
+**驗證修復：**
+
+```powershell
+# 確認工作目錄乾淨
+git status
+# 應該顯示：nothing to commit, working tree clean
+
+# 確認檔案已被追蹤
+git ls-files nnResUNet/ | Select-Object -First 10
+# 應該能看到實際的檔案列表，而非空白
+
+# 確認沒有 .git 子目錄
+Test-Path "nnResUNet\.git"
+# 應該顯示：False
+```
+
+**注意事項：**
+
+⚠️ **重要**：如果 `nnResUNet` 原本就是一個獨立的 Git 專案（有自己的開發歷史），移除 `.git` 會遺失該專案的提交歷史。
+
+如果需要保留歷史，應該使用正式的 Git Submodule 管理：
+
+```powershell
+# 正式設定 submodule（保留歷史，進階用法）
+git submodule add <repository_url> nnResUNet
+git commit -m "新增 nnResUNet 作為 submodule"
+```
+
+但對於訓練程式碼專案，通常建議將所有程式碼直接整合到主倉庫，使用普通資料夾即可。
+
 ---
 
 ## .gitignore 設定
