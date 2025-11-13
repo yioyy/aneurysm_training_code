@@ -1,0 +1,15 @@
+{
+    "TASK": "MRA_Vessel",
+    "No.": "561",
+    "description": "MTA vessel segmentation dataset",
+    "labels": {
+        "background": 0,
+        "vessel": 1
+    },
+    "channel_names": {
+        "0": "MRA"
+    },
+    "numTraining": 820,
+    "file_ending": ".nii.gz",
+    "val_as_test": "n"
+}

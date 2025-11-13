@@ -1,0 +1,20 @@
+
+This is the configuration used by this training:
+Configuration name: 3d_fullres
+ {'data_identifier': 'nnUNetPlans_3d_fullres', 'preprocessor_name': 'DefaultPreprocessor', 'batch_size': 900, 'patch_size': [16, 32, 32], 'median_image_size_in_voxels': [16.0, 32.0, 32.0], 'spacing': [0.6999997496604919, 0.44920000433921814, 0.44920000433921814], 'normalization_schemes': ['NoNormalization'], 'use_mask_for_norm': [False], 'UNet_class_name': 'ResidualEncoderUNet', 'UNet_base_num_features': 32, 'n_conv_per_stage_encoder': [2, 2, 2, 2, 2], 'n_conv_per_stage_decoder': [2, 2, 2, 2], 'num_pool_per_axis': [3, 4, 4], 'pool_op_kernel_sizes': [[1, 1, 1], [1, 2, 2], [2, 2, 2], [2, 2, 2], [2, 2, 2]], 'conv_kernel_sizes': [[1, 3, 3], [3, 3, 3], [3, 3, 3], [3, 3, 3], [3, 3, 3]], 'unet_max_num_features': 512, 'resampling_fn_data': 'resample_data_or_seg_to_shape', 'resampling_fn_seg': 'resample_data_or_seg_to_shape', 'resampling_fn_data_kwargs': {'is_seg': False, 'order': 3, 'order_z': 0, 'force_separate_z': None}, 'resampling_fn_seg_kwargs': {'is_seg': True, 'order': 1, 'order_z': 0, 'force_separate_z': None}, 'resampling_fn_probabilities': 'resample_data_or_seg_to_shape', 'resampling_fn_probabilities_kwargs': {'is_seg': False, 'order': 1, 'order_z': 0, 'force_separate_z': None}, 'batch_dice': False} 
+ 
+These are the global plan.json settings:
+ {'dataset_name': 'Dataset080_DeepAneurysm', 'plans_name': 'nnUNetPlans', 'original_median_spacing_after_transp': [0.6999997496604919, 0.44920000433921814, 0.44920000433921814], 'original_median_shape_after_transp': [133, 512, 512], 'image_reader_writer': 'SimpleITKIO', 'transpose_forward': [0, 1, 2], 'transpose_backward': [0, 1, 2], 'experiment_planner_used': 'ExperimentPlanner', 'label_manager': 'LabelManager', 'foreground_intensity_properties_per_channel': {'0': {'max': 3.198979616165161, 'mean': 0.7366887643438168, 'median': 0.6796993017196655, 'min': -0.02173912525177002, 'percentile_00_5': 0.10982628911733627, 'percentile_99_5': 1.914076566696167, 'std': 0.36197441199421027}}} 
+ 
+2025-06-24 18:46:36.486589: unpacking dataset... 
+2025-06-24 18:46:38.173276: unpacking done... 
+2025-06-24 18:46:38.174753: do_dummy_2d_data_aug: False 
+2025-06-24 18:46:38.179122: Using splits from existing split file: /tmp/nnUNet_preprocessed/Dataset080_DeepAneurysm/splits_final.json 
+2025-06-24 18:46:38.228886: The split file contains 100 splits. 
+2025-06-24 18:46:38.229072: Desired fold for training: 13 
+2025-06-24 18:46:38.229138: This split has 2671 training and 445 validation cases. 
+2025-06-24 18:47:26.865671: Unable to plot network architecture: 
+2025-06-24 18:47:26.865826: module 'torch.jit' has no attribute 'get_trace_graph' 
+2025-06-24 18:47:26.946662:  
+2025-06-24 18:47:26.946784: Epoch 0 
+2025-06-24 18:47:26.946950: Current learning rate: 0.001 
