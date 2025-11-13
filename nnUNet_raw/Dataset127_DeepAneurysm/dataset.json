@@ -1,0 +1,14 @@
+{
+  "TASK": "DeepAneurysm",
+  "No.": "127",
+  "channel_names": {
+    "0": "MRA_BRAIN"
+  },
+  "labels": {
+    "background": 0,
+    "Aneurysm": 1
+  },
+  "numTraining": 1117,
+  "file_ending": ".nii.gz",
+  "val_as_test": "n"
+}

@@ -65,11 +65,8 @@ logs/
 # nnResUNet_long_BigBatch_cosine_AneDilate_classifier_test/  # 已取消忽略
 
 # nnUNet 推理結果資料夾（大型檔案不納入）
-nnUNet_inference/
-nnUNet_preprocessed/
-example_input/
-example_output/
-nnUNet_raw/Dataset127_DeepAneurysm/
+example_input/00165585_20221018_MR_21110170148/
+example_output/00165585_20221018_MR_21110170148/
 
 
 # nnUNet/nnUNet_results/  # 模型權重視需求決定
@@ -85,4 +82,3 @@ Thumbs.db
 *.tmp
 *.log
 model_weights/
-process/
