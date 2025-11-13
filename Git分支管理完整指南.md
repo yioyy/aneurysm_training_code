@@ -637,6 +637,162 @@ git commit -m "新增 nnResUNet 作為 submodule"
 
 但對於訓練程式碼專案，通常建議將所有程式碼直接整合到主倉庫，使用普通資料夾即可。
 
+### Q10：修改 .gitignore 後仍無法排除已提交的檔案？
+
+**問題情境：**
+
+您不小心提交了大型資料檔案（如 `.nii.gz` 影像），之後在 `.gitignore` 加入排除規則，但檔案仍然被追蹤。
+
+```powershell
+# 提交歷史
+$ git commit -m "新增資料夾架構"
+ 24 files changed, 888 insertions(+)
+ create mode 100644 nnUNet_raw/.../DeepAneurysm_000001.nii.gz
+ create mode 100644 nnUNet_raw/.../DeepAneurysm_000002.nii.gz
+ ... (共 20 個 .nii.gz 檔案)
+
+# 更新 .gitignore
+$ echo "*.nii.gz" >> .gitignore
+
+# 但檔案仍然顯示在 git status 中
+$ git status
+Changes not staged for commit:
+  modified:   nnUNet_raw/.../DeepAneurysm_000001.nii.gz
+```
+
+**問題原因：**
+
+`.gitignore` **只對未追蹤的檔案有效**。如果檔案已經被 `git add` 和 `git commit`，Git 會持續追蹤這些檔案，`.gitignore` 無法生效。
+
+**解決方案：從 Git 移除追蹤（但保留本地檔案）**
+
+```powershell
+# 步驟 1：確認有哪些檔案被追蹤
+git ls-files | Select-String "\.nii\.gz"
+
+# 輸出範例：
+# nnUNet_raw/Dataset127_DeepAneurysm/imagesTr/DeepAneurysm_000001_0000.nii.gz
+# nnUNet_raw/Dataset127_DeepAneurysm/imagesTr/DeepAneurysm_000002_0000.nii.gz
+# ... (共 20 個檔案)
+
+# 步驟 2：從 Git 移除追蹤（--cached = 只移除追蹤，保留本地檔案）
+git rm --cached -r "*.nii.gz"
+
+# 輸出：
+# rm 'nnUNet_raw/.../DeepAneurysm_000001.nii.gz'
+# rm 'nnUNet_raw/.../DeepAneurysm_000002.nii.gz'
+# ... (共 20 個檔案)
+
+# 步驟 3：查看狀態
+git status
+# 應該看到：
+# Changes to be committed:
+#   deleted:    nnUNet_raw/.../DeepAneurysm_000001.nii.gz
+#   deleted:    nnUNet_raw/.../DeepAneurysm_000002.nii.gz
+#   ... (這些是從 Git 刪除，本地檔案仍在)
+
+# 步驟 4：驗證本地檔案仍存在
+Test-Path "nnUNet_raw\Dataset127_DeepAneurysm\imagesTr\*.nii.gz"
+# 應該顯示：True（本地檔案還在）
+
+# 步驟 5：提交變更
+git commit -m "Remove .nii.gz files from Git tracking"
+
+# 步驟 6：推送到 GitHub
+git push origin main
+```
+
+**完整範例：一次移除所有大型檔案**
+
+```powershell
+# 進入專案目錄
+cd "C:\Users\user\Desktop\nnUNet\nnResUNet-github"
+
+# 確認 .gitignore 已設定
+notepad .gitignore
+# 確認有這行：*.nii.gz
+
+# 移除所有 .nii.gz 的追蹤
+git rm --cached -r "*.nii.gz"
+
+# 也可以移除其他大型檔案
+git rm --cached -r "*.pth"     # PyTorch 模型權重
+git rm --cached -r "*.h5"      # Keras/TensorFlow 模型權重
+git rm --cached -r "*.pkl"     # Pickle 檔案
+
+# 提交
+git commit -m "Remove large data files from Git tracking"
+
+# 推送
+git push origin main
+```
+
+**驗證修復：**
+
+```powershell
+# 1. 確認 Git 不再追蹤這些檔案
+git ls-files | Select-String "\.nii\.gz"
+# 應該沒有輸出（表示已不再追蹤）
+
+# 2. 確認本地檔案仍然存在
+Get-ChildItem -Path "nnUNet_raw" -Filter "*.nii.gz" -Recurse
+# 應該能看到檔案列表
+
+# 3. 測試新增檔案是否自動忽略
+# 複製一個新的 .nii.gz 檔案到資料夾
+git status
+# 不應該看到新的 .nii.gz 檔案（被 .gitignore 自動忽略）
+```
+
+**常見檔案類型建議：**
+
+| 檔案類型 | 是否上傳 Git | 原因 |
+|---------|-------------|------|
+| `.py`, `.json`, `.md` | ✅ 上傳 | 程式碼和設定檔，檔案小且重要 |
+| `.nii.gz`, `.dcm` | ❌ 不上傳 | 醫學影像，檔案太大 |
+| `.pth`, `.h5`, `.pb` | ❌ 不上傳 | 模型權重，檔案太大 |
+| `.npz`, `.pkl` | ❌ 不上傳 | 前處理資料，可重新生成 |
+| `dataset.json` | ✅ 上傳 | 資料集描述檔，檔案小 |
+
+**注意事項：**
+
+⚠️ **重要**：`git rm --cached` 只影響 Git 追蹤，**不會刪除本地檔案**。如果誤用 `git rm`（沒有 `--cached`），會同時刪除本地檔案！
+
+```powershell
+# ✅ 正確：只移除追蹤，保留本地檔案
+git rm --cached file.nii.gz
+
+# ❌ 錯誤：會刪除本地檔案！
+git rm file.nii.gz  # 危險！
+```
+
+**替代方案：使用 Git LFS（適合需要版本控制大型檔案的情況）**
+
+如果您的團隊需要追蹤大型檔案的版本變化：
+
+```powershell
+# 安裝 Git LFS
+git lfs install
+
+# 追蹤大型檔案類型
+git lfs track "*.nii.gz"
+git lfs track "*.pth"
+
+# 提交 .gitattributes
+git add .gitattributes
+git commit -m "Configure Git LFS for large files"
+
+# 之後正常提交大型檔案
+git add *.nii.gz
+git commit -m "Add medical images via Git LFS"
+git push origin main
+```
+
+但對於醫學影像資料集，通常建議：
+- 不上傳到 Git
+- 使用專門的資料儲存服務（Google Drive、機構伺服器）
+- 在 README 提供下載連結
+
 ---
 
 ## .gitignore 設定
