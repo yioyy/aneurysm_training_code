@@ -50,7 +50,7 @@ pip install -e .
 **步驟 5：驗證安裝**
 ```bash
 python -c "import torch; import tensorflow as tf; import nnunetv2; print('✅ 安裝成功！')"
-python -c "print('CUDA 可用:', torch.cuda.is_available())"
+python -c "import torch; print('CUDA 可用:', torch.cuda.is_available())"
 ```
 
 #### 主要套件版本
@@ -60,6 +60,7 @@ python -c "print('CUDA 可用:', torch.cuda.is_available())"
 | PyTorch | 2.6.0 | nnU-Net 深度學習框架 |
 | TensorFlow | 2.14.0 | 血管分割與前處理模型 |
 | NumPy | 1.26.4 | 數值計算 |
+| nbclassic | 0.5.5 | 互動式開發環境（支援 Ctrl+/ 註解） |
 | nibabel | 5.2.1 | NIfTI 影像處理 |
 | SimpleITK | 2.3.1 | 醫學影像處理 |
 | scikit-image | 0.22.0 | 影像處理與形態學操作 |
@@ -69,13 +70,73 @@ python -c "print('CUDA 可用:', torch.cuda.is_available())"
 
 #### 疑難排解
 
-**問題 1：brainextractor 安裝失敗**
+**問題 1：Jupyter 啟動錯誤（ModuleNotFoundError: jupyter_server.contents）**
+```bash
+# 錯誤原因：notebook 和 jupyter-server 版本不相容
+# 解決方案：使用 nbclassic（Notebook 6.x 的現代實現）
+# 
+# === 快速修復（推薦）===
+pip uninstall -y notebook jupyter-server jupyter-client jupyter-core nbclassic
+pip install -r requirements.txt
+
+# === 驗證安裝 ===
+jupyter --version
+python -c "import nbclassic; print('✅ nbclassic 安裝成功')"
+
+# === 啟動 Jupyter Notebook ===
+# 方法 1：使用 nbclassic（推薦）
+jupyter nbclassic
+
+# 方法 2：創建別名後使用 notebook（需先設定別名）
+# echo "alias notebook='jupyter nbclassic'" >> ~/.bashrc
+# source ~/.bashrc
+# notebook --ip=10.103.1.188 --no-browser
+
+# 遠端存取範例
+jupyter nbclassic --ip=10.103.1.188 --no-browser
+
+# 允許所有 IP 存取
+jupyter nbclassic --ip=0.0.0.0 --port=8888 --no-browser
+
+# 注意：
+# - nbclassic 是 Notebook 6.x 的現代化實現
+# - 完全支援 Ctrl+/ 快速註解/取消註解程式碼
+# - 介面和功能與傳統 notebook 完全相同
+# - 更穩定，相容性更好
+# - 如需使用 'jupyter notebook' 指令，請設定別名（見上方）
+```
+
+**如何使用 `jupyter notebook` 指令（可選設定）：**
+
+如果您習慣使用 `jupyter notebook` 而非 `jupyter nbclassic`，可以設定別名：
+
+```bash
+# 在 ~/.bashrc 中添加別名
+echo "alias notebook='jupyter nbclassic'" >> ~/.bashrc
+source ~/.bashrc
+
+# 現在可以使用
+notebook
+notebook --ip=10.103.1.188 --no-browser
+```
+
+**Jupyter Notebook 常用快捷鍵：**
+- `Ctrl + /`：註解/取消註解選中的程式碼 ⭐
+- `Shift + Enter`：執行當前 cell 並移到下一個
+- `Ctrl + Enter`：執行當前 cell 不移動
+- `A`：在上方插入新 cell（命令模式）
+- `B`：在下方插入新 cell（命令模式）
+- `D + D`：刪除當前 cell（命令模式）
+- `M`：將 cell 轉為 Markdown（命令模式）
+- `Y`：將 cell 轉為 Code（命令模式）
+
+**問題 2：brainextractor 安裝失敗**
 ```bash
 # 嘗試從 GitHub 安裝
 pip install git+https://github.com/dylanhsu/BrainExtractor.git
 ```
 
-**問題 2：CUDA 版本不符**
+**問題 3：CUDA 版本不符**
 ```bash
 # 確認系統 CUDA 版本
 nvcc --version
@@ -84,7 +145,7 @@ nvcc --version
 # 請至 https://pytorch.org/ 查詢對應版本
 ```
 
-**問題 3：記憶體不足**
+**問題 4：記憶體不足**
 - 減少 batch size
 - 使用較小的 patch size
 - 啟用混合精度訓練
@@ -364,7 +425,7 @@ CUDA_VISIBLE_DEVICES=0 nnUNetv2_train 127 3d_fullres 0 \
 
 1. 開啟 Jupyter Notebook：
    ```bash
-   jupyter notebook nnResUNet/predict_from_raw_data_jupyter_test_gaussian_1to1_1_aneurysm.ipynb
+   jupyter nbclassic nnResUNet/predict_from_raw_data_jupyter_test_gaussian_1to1_1_aneurysm.ipynb
    ```
 
 2. 執行前面的所有 cell 以載入必要的函數和類別
@@ -440,7 +501,7 @@ CUDA_VISIBLE_DEVICES=0 nnUNetv2_train 127 3d_fullres 0 \
 
 1. 開啟 Jupyter Notebook：
    ```bash
-   jupyter notebook pipline_aneurysm.ipynb
+   jupyter nbclassic pipline_aneurysm.ipynb
    ```
 
 2. 準備輸入資料：

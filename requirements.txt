@@ -11,6 +11,7 @@ keras==2.14.0
 numpy==1.26.4
 scipy==1.11.4
 pandas==2.1.4
+openpyxl==3.1.2
 
 # ===== nnU-Net 相關套件 =====
 acvl-utils==0.2
@@ -39,6 +40,19 @@ pynvml==11.5.0
 # ===== 腦部影像處理 =====
 brainextractor
 
+# ===== Jupyter 環境 =====
+# 使用 nbclassic 0.5.5（Notebook 6.x 的現代實現，支援 Ctrl+/ 註解快捷鍵）
+jupyter==1.0.0
+nbclassic==0.5.5
+jupyter-server==1.23.6
+jupyter-client==7.4.9
+jupyter-core==5.3.1
+ipykernel==6.27.1
+ipywidgets==8.1.1
+nbconvert==7.8.0
+nbformat==5.9.2
+tornado==6.2
+
 # ===== 其他工具 =====
 tqdm==4.66.1
 graphviz==0.20.1
@@ -46,25 +60,66 @@ tifffile==2023.12.9
 requests==2.31.0
 imagecodecs==2023.9.18
 yacs==0.1.8
+mlflow==2.9.2
 
 # ===== 安裝說明 =====
-# 建議安裝順序:
+# ⚠️ 重要：請按照以下順序安裝，避免重新下載 PyTorch！
 #
 # 1. 建立虛擬環境 (Python 3.9-3.11):
 #    conda create -n aneurysm python=3.10
 #    conda activate aneurysm
 #
-# 2. 先安裝 PyTorch (CUDA 12.4):
+# 2. 先單獨安裝 PyTorch (CUDA 12.4)【重要！】:
 #    pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
 #
-# 3. 安裝其他套件:
+# 3. 再安裝其他套件（不包含 PyTorch）:
+#    # 方法 A：從 requirements.txt 安裝（自動跳過已安裝的 torch）
 #    pip install -r requirements.txt
 #
-# 4. 如果 brainextractor 安裝失敗，可以嘗試:
-#    pip install git+https://github.com/dylanhsu/BrainExtractor.git
+#    # 方法 B：如果方法 A 仍要重新下載 torch，請分開安裝：
+#    pip install tensorflow==2.14.0 keras==2.14.0
+#    pip install numpy==1.26.4 scipy==1.11.4 pandas==2.1.4
+#    pip install jupyter==1.0.0 nbclassic==0.5.5 jupyter-server==1.23.6
+#    pip install jupyter-client==7.4.9 ipykernel==6.27.1 ipywidgets==8.1.1 tornado==6.2
+#    pip install nibabel SimpleITK pydicom scikit-image opencv-python scikit-learn
+#    pip install matplotlib seaborn tqdm pynvml brainextractor
 #
-# 5. 驗證安裝:
-#    python -c "import torch; import tensorflow as tf; import brainextractor; print('安裝成功！')"
+# 4. 驗證安裝:
+#    python -c "import torch; import tensorflow as tf; import nnunetv2; print('✅ 套件安裝成功！')"
+#    python -c "import torch; print('CUDA 可用:', torch.cuda.is_available())"
+#    jupyter --version  # 驗證 Jupyter 安裝
 #
-# 注意: SimpleITK 和 scikit-learn 已包含在 requirements.txt 中
+# 5. 啟動 Jupyter Notebook:
+#    jupyter nbclassic
+#    
+#    可選：設定別名以使用 'notebook' 指令
+#    echo "alias notebook='jupyter nbclassic'" >> ~/.bashrc
+#    source ~/.bashrc
+#    notebook
+#
+# ===== 疑難排解 =====
+# 
+# Q: 為什麼安裝其他套件時會重新下載 PyTorch？
+# A: 這通常是因為：
+#    1. 使用了 --force-reinstall 參數
+#    2. 某些套件依賴特定版本的 torch
+#    解決方法：先單獨安裝 PyTorch，再安裝其他套件
+#
+# Q: brainextractor 安裝失敗
+# A: pip install git+https://github.com/dylanhsu/BrainExtractor.git
+#
+# Q: Jupyter 啟動錯誤（ModuleNotFoundError: jupyter_server.contents）
+# A: 使用 nbclassic 替代 notebook：
+#    pip uninstall -y notebook jupyter-server jupyter-client jupyter-core nbclassic
+#    pip install jupyter==1.0.0 nbclassic==0.5.5 jupyter-server==1.23.6
+#    pip install jupyter-client==7.4.9 ipykernel ipywidgets tornado==6.2
+#    啟動指令：jupyter nbclassic（而非 jupyter notebook）
+#
+# ===== 注意事項 =====
+# - 本專案使用 nbclassic 0.5.5（Notebook 6.x 的現代實現）
+# - 優點：支援 Ctrl+/ 快捷鍵來註解/取消註解程式碼
+# - 啟動指令：jupyter nbclassic（而非 jupyter notebook）
+# - 介面和功能與傳統 notebook 完全相同，相容性更好
+# - 如需新版介面: pip install jupyterlab
+# - 已包含所有必要套件: Jupyter、SimpleITK、scikit-learn 等
 
