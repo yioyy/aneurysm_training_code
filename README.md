@@ -5,7 +5,92 @@
 
 ## 環境設置
 
+### 系統需求
+
+**硬體需求：**
+- GPU：NVIDIA GPU（建議 V100 或更高等級）
+- VRAM：建議 16GB 以上
+- CPU：16 核心以上
+- RAM：建議 64GB 以上（訓練時 128GB 更佳）
+- 儲存空間：建議 500GB 以上
+
+**軟體需求：**
+- Python：3.9-3.11
+- CUDA：12.4
+- cuDNN：對應 CUDA 12.4 的版本
+
+### 套件安裝
+
+本專案提供完整的 `requirements.txt` 檔案，包含所有必要的依賴套件。
+
+#### 快速安裝指南
+
+**步驟 1：建立虛擬環境**
+```bash
+conda create -n aneurysm python=3.10
+conda activate aneurysm
+```
+
+**步驟 2：安裝 PyTorch（CUDA 12.4）**
+```bash
+pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+```
+
+**步驟 3：安裝其他套件**
+```bash
+pip install -r requirements.txt
+```
+
+**步驟 4：安裝 nnU-Net**
+```bash
+cd nnResUNet
+pip install -e .
+```
+
+**步驟 5：驗證安裝**
+```bash
+python -c "import torch; import tensorflow as tf; import nnunetv2; print('✅ 安裝成功！')"
+python -c "print('CUDA 可用:', torch.cuda.is_available())"
+```
+
+#### 主要套件版本
+
+| 套件 | 版本 | 用途 |
+|------|------|------|
+| PyTorch | 2.6.0 | nnU-Net 深度學習框架 |
+| TensorFlow | 2.14.0 | 血管分割與前處理模型 |
+| NumPy | 1.26.4 | 數值計算 |
+| nibabel | 5.2.1 | NIfTI 影像處理 |
+| SimpleITK | 2.3.1 | 醫學影像處理 |
+| scikit-image | 0.22.0 | 影像處理與形態學操作 |
+| brainextractor | latest | 腦部組織提取 |
+
+完整的套件列表請參考 `requirements.txt` 檔案。
+
+#### 疑難排解
+
+**問題 1：brainextractor 安裝失敗**
+```bash
+# 嘗試從 GitHub 安裝
+pip install git+https://github.com/dylanhsu/BrainExtractor.git
+```
+
+**問題 2：CUDA 版本不符**
+```bash
+# 確認系統 CUDA 版本
+nvcc --version
+
+# 安裝對應版本的 PyTorch
+# 請至 https://pytorch.org/ 查詢對應版本
+```
+
+**問題 3：記憶體不足**
+- 減少 batch size
+- 使用較小的 patch size
+- 啟用混合精度訓練
+
 ### TWCC 開發環境
+
 本專案在 TWCC（台灣 AI 雲）上進行開發和訓練：
 
 **容器配置：**
@@ -17,9 +102,7 @@
 
 **環境安裝：**
 ```bash
-# 1. 進入容器後安裝 nnU-Net
-cd nnResUNet
-pip install -e .
+# 1. 按照上述「套件安裝」步驟安裝所有依賴
 
 # 2. 設置 nnU-Net 環境變數
 export nnUNet_raw="/path/to/nnUNet_raw"
@@ -27,6 +110,10 @@ export nnUNet_preprocessed="/path/to/nnUNet_preprocessed"
 export nnUNet_results="/path/to/nnUNet_results"
 
 # 建議將上述環境變數寫入 ~/.bashrc
+echo 'export nnUNet_raw="/path/to/nnUNet_raw"' >> ~/.bashrc
+echo 'export nnUNet_preprocessed="/path/to/nnUNet_preprocessed"' >> ~/.bashrc
+echo 'export nnUNet_results="/path/to/nnUNet_results"' >> ~/.bashrc
+source ~/.bashrc
 ```
 
 ## 資料準備
