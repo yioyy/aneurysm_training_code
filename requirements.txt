@@ -4,6 +4,7 @@
 # 深度學習框架
 torch==2.6.0
 torchvision==0.21.0
+torchinfo==1.8.0
 tensorflow==2.14.0
 keras==2.14.0
 
