@@ -193,8 +193,8 @@ nnUNet_raw/
 └── Dataset127_DeepAneurysm/      # 動脈瘤分割模型資料集
     ├── imagesTr/                 # 訓練影像
     ├── labelsTr/                 # 訓練標註
-    ├── vesselsTr/                # 訓練時的正常樣本，避免模型隨機到血管以外的地方
-    ├── dilationsTr/              # 訓練時的病灶範圍，幫助模型可以在病灶位置可以採樣更大的區域        
+    ├── vesselsTr/                # 控制訓練時的正常樣本範圍，放Vessel.nii.gz，使訓練時只會隨機到存在vessel的地方
+    ├── dilationsTr/              # 訓練時的病灶範圍，只跟採樣有關，放label，即只會隨機採樣有標註的座標點，手動dilate標註可以增加採樣的範圍(可做)      
     ├── imagesTs/                 # 測試影像（可選）
     └── dataset.json              # 資料集描述檔
 ```
