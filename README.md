@@ -210,6 +210,7 @@ nnUNet_raw/
 ### 1. 血管分割模型訓練 (Dataset550_MRA_Vessel)
 
 **步驟 1：資料前處理和實驗規劃**
+
 需要先使用make_normalized_img.py將影像正規化或在dataset.json與nnU-Net中自訂正規化的方式
 
 ```bash
@@ -236,6 +237,8 @@ CUDA_VISIBLE_DEVICES=0 taskset -c 0-15 nnUNetv2_train 550 3d_fullres 0 \
 ### 2. 動脈瘤分割模型訓練 (Dataset127_DeepAneurysm)
 
 **步驟 1：資料前處理和實驗規劃**
+
+需要先使用make_normalized_img.py將影像正規化或在dataset.json與nnU-Net中自訂正規化的方式
 ```bash
 # 使用 16 個 CPU 核心進行前處理
 taskset -c 0-45 nnUNetv2_plan_and_preprocess -d 127 -c 3d_fullres -np 16
@@ -374,7 +377,6 @@ CUDA_VISIBLE_DEVICES=0 taskset -c 0-15 nnUNetv2_train 127 3d_fullres 0 \
 #### 訓練指令範例
 
 **基本訓練（使用預設參數）：**
-需要先使用make_normalized_img.py將影像正規化或在dataset.json與nnU-Net中自訂正規化的方式
 ```bash
 CUDA_VISIBLE_DEVICES=0 nnUNetv2_train 127 3d_fullres 0
 ```
