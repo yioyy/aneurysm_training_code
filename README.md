@@ -422,18 +422,19 @@ CUDA_VISIBLE_DEVICES=0 nnUNetv2_train 127 3d_fullres 0 \
 使用 `nnResUNet/predict_from_raw_data_jupyter_test_gaussian_1to1_1_aneurysm.ipynb`
 
 **操作步驟：**
+1. 需要先使用make_normalized_img.py將影像正規化
 
-1. 開啟 Jupyter Notebook：
+2. 開啟 Jupyter Notebook：
    ```bash
    jupyter nbclassic nnResUNet/predict_from_raw_data_jupyter_test_gaussian_1to1_1_aneurysm.ipynb
    ```
 
-2. 執行前面的所有 cell 以載入必要的函數和類別
+3. 執行前面的所有 cell 以載入必要的函數和類別
 
-3. 修改最後一個 cell 的推理參數：
+4. 修改最後一個 cell 的推理參數：
    ```python
    predict_from_raw_data(
-       # 輸入資料夾（MRA 影像）
+       # 輸入資料夾（MRA 正規化後的影像）
        '/path/to/input/images/',
        
        # 血管遮罩資料夾（用於加速推理）
@@ -486,14 +487,14 @@ CUDA_VISIBLE_DEVICES=0 nnUNetv2_train 127 3d_fullres 0 \
    )
    ```
 
-4. 執行該 cell 開始推理
+5. 執行該 cell 開始推理
 
 **效能調整建議：**
 - **最高品質模式**：`use_gaussian=True, batch_size=4`
 - **平衡模式**：`use_gaussian=True, batch_size=8-16`
 - **最快速度模式**：`use_gaussian=False, batch_size=32-112`
 
-### 方法 2：完整 Pipeline 推理
+### 方法 2：完整 Pipeline 推理(目前僅驗證過雙和、亞東資料)
 
 使用 `pipline_aneurysm.ipynb` 進行完整的 MRA 影像處理（包含前處理、血管分割、動脈瘤檢測）
 
