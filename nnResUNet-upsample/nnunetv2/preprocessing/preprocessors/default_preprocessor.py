@@ -152,7 +152,7 @@ class DefaultPreprocessor(object):
             seed = random.randint(0, 2**32 - 1)  # 生成一個隨機的 seed
             data_properites['vessel_locations'] = self._sample_locations(vessel, seed = seed, verbose=self.verbose)
 
-        #最後，用一個欄位紀錄出vessel位置
+        #最後，用一個欄位紀錄出動脈瘤dilate位置
         if dilate_file is not None:
             label_manager = plans_manager.get_label_manager(dataset_json)
             collect_for_this = label_manager.foreground_regions if label_manager.has_regions \
@@ -182,7 +182,7 @@ class DefaultPreprocessor(object):
         data, seg, properties = self.run_case(image_files, seg_file, plans_manager, configuration_manager, 
                                                dataset_json, vessel_file=vessel_file, dilate_file=dilate_file)
         # print('dtypes', data.dtype, seg.dtype)
-        np.savez_compressed(output_filename_truncated + '.npz', data=data.astype('float16'), seg=seg) #以float16保存
+        np.savez_compressed(output_filename_truncated + '.npz',  data=data.astype('float16'), seg=seg) #以float16保存
         write_pickle(properties, output_filename_truncated + '.pkl')
 
     @staticmethod
@@ -217,13 +217,77 @@ class DefaultPreprocessor(object):
     
     @staticmethod
     def _sample_locations(seg: np.ndarray, seed: int = 1234, verbose: bool = False):
-        # sparse
-        selected = []
-        rndst = np.random.RandomState(seed)
-        if np.sum(seg) > 0:
-            all_locs = np.argwhere(seg)
+        """
+        vessel 取樣座標。
 
-            selected = all_locs[rndst.choice(len(all_locs), len(all_locs), replace=False)]
+        - **二元/單類**（所有 >0 都視為同一類）: 回傳所有前景 voxel 座標（隨機打散）
+        - **多類別**（值=1..n）: 針對每個 label 分別取出座標，並把每類補齊到「最大類」的 voxel 數，
+          使後續隨機抽樣時各類別機率趨近 1:1:...（允許重複座標）
+        """
+
+        def _repeat_to_target(locs: np.ndarray, target: int, rnd: np.random.RandomState) -> np.ndarray:
+            n = int(len(locs))
+            if n == 0 or target <= 0:
+                return np.empty((0, locs.shape[1]), dtype=locs.dtype)
+
+            full_repeats = target // n
+            remainder = target % n
+            chunks = []
+
+            # 完整取多輪（每輪都是不重複的 permutation）
+            for _ in range(full_repeats):
+                chunks.append(locs[rnd.permutation(n)])
+
+            # 最後一輪截斷補齊差額
+            if remainder > 0:
+                perm = rnd.permutation(n)
+                chunks.append(locs[perm[:remainder]])
+
+            return np.concatenate(chunks, axis=0) if len(chunks) > 0 else np.empty((0, locs.shape[1]), dtype=locs.dtype)
+
+        rndst = np.random.RandomState(seed)
+
+        if seg is None:
+            return np.empty((0, 0), dtype=np.int64)
+
+        seg_arr = np.asarray(seg)
+        fg_mask = seg_arr > 0
+        if not np.any(fg_mask):
+            return np.empty((0, seg_arr.ndim), dtype=np.int64)
+
+        # 只看前景 label（忽略 0）
+        labels = np.unique(seg_arr[fg_mask])
+        # 安全起見轉成 int，避免 float label（resample 後理論上是 int）
+        labels = np.array([int(i) for i in labels.tolist()], dtype=np.int64)
+        labels = labels[labels > 0]
+
+        # 若只有一個 label，行為等同「取全部前景」但仍保持隨機打散
+        if len(labels) <= 1:
+            all_locs = np.argwhere(fg_mask)
+            return all_locs[rndst.permutation(len(all_locs))]
+
+        # 多類別：每類補齊到最大類 voxel 數
+        per_label_locs = []
+        counts = []
+        for lb in labels:
+            locs = np.argwhere(seg_arr == lb)
+            per_label_locs.append(locs)
+            counts.append(int(len(locs)))
+
+        max_count = int(max(counts)) if len(counts) > 0 else 0
+        if max_count == 0:
+            return np.empty((0, seg_arr.ndim), dtype=np.int64)
+
+        if verbose:
+            msg = ", ".join([f"{int(lb)}:{c}" for lb, c in zip(labels.tolist(), counts)])
+            print(f"[vessel sampling] labels/counts = {msg}; target_per_label = {max_count}")
+
+        balanced = [_repeat_to_target(locs, max_count, rndst) for locs in per_label_locs]
+        selected = np.concatenate(balanced, axis=0)
+
+        # 打散各類別的座標，避免順序偏差（即使後續通常是隨機抽樣）
+        if len(selected) > 1:
+            selected = selected[rndst.permutation(len(selected))]
         return selected
 
     def _normalize(self, data: np.ndarray, seg: np.ndarray, configuration_manager: ConfigurationManager,
