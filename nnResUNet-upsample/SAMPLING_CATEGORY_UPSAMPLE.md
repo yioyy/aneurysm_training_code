@@ -53,3 +53,15 @@ trainer 在建立 `sampling_probabilities` 後，除了印出你設定的權重�
 - fold 內各類別 case 數量不均時的影響
 - `SAMPLING_CATEGORY_WEIGHT_MODE` 不同時的最終差異
 
+## 在 run_training.py 透過參數設定比例
+
+你可以在啟動訓練時，直接用參數覆寫 trainer 的 `SAMPLING_CATEGORY_WEIGHTS`（以及可選的 mode）：
+
+```bash
+# 例：設定 4 類別權重為 2:1:1:1（對應類別 1~4）
+python nnunetv2/run/run_training.py DatasetXXX_YYY 3d_fullres 0 --sampling_category_weights 2:1:1:1
+
+# 例：顯式指定 mode（可選）
+python nnunetv2/run/run_training.py DatasetXXX_YYY 3d_fullres 0 --sampling_category_weights 1:1:1:1 --sampling_category_weight_mode target_proportion
+```
+

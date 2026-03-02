@@ -1,6 +1,7 @@
+import json
 import os
 import socket
-from typing import Union, Optional
+from typing import Union, Optional, Dict
 
 import nnunetv2
 import torch.cuda
@@ -13,6 +14,57 @@ from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 from nnunetv2.utilities.dataset_name_id_conversion import maybe_convert_to_dataset_name
 from nnunetv2.utilities.find_class_by_name import recursive_find_python_class
 from torch.backends import cudnn
+
+
+def parse_sampling_category_weights(raw: str) -> Dict[int, float]:
+    """
+    Parse sampling category weights from CLI string.
+
+    Supported formats:
+    - Ratio: "2:1:1:1" or "2,1,1,1" (maps to categories 1..4)
+    - Key=Value pairs: "1=2,2=1,3=1,4=1" (separator can be ',' or ';')
+    - JSON: "{\"1\": 2, \"2\": 1, \"3\": 1, \"4\": 1}" or "{\"1\": 2}"
+    """
+    if raw is None:
+        raise ValueError("raw must not be None")
+    s = raw.strip()
+    if not s:
+        raise ValueError("sampling_category_weights is empty")
+
+    # JSON dict (keys may be strings)
+    if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+        try:
+            obj = json.loads(s)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON for sampling_category_weights: {e}") from e
+        if not isinstance(obj, dict):
+            raise ValueError("JSON sampling_category_weights must be an object/dict")
+        out: Dict[int, float] = {}
+        for k, v in obj.items():
+            try:
+                kk = int(k)
+            except Exception as e:
+                raise ValueError(f"Invalid category id key '{k}' (must be int)") from e
+            out[kk] = float(v)
+        return out
+
+    # key=value list
+    if "=" in s:
+        parts = [p.strip() for p in s.replace(";", ",").split(",") if p.strip()]
+        out: Dict[int, float] = {}
+        for p in parts:
+            if "=" not in p:
+                raise ValueError(f"Invalid key=value token '{p}'")
+            k_str, v_str = [x.strip() for x in p.split("=", 1)]
+            out[int(k_str)] = float(v_str)
+        return out
+
+    # ratio list -> map to 1..N (expects 4 for vessel 4-class use)
+    parts = [p.strip() for p in s.replace(":", ",").split(",") if p.strip()]
+    vals = [float(p) for p in parts]
+    if len(vals) != 4:
+        raise ValueError("Ratio format must provide exactly 4 values, e.g. '2:1:1:1'")
+    return {1: vals[0], 2: vals[1], 3: vals[2], 4: vals[3]}
 
 
 def find_free_network_port() -> int:
@@ -44,7 +96,9 @@ def get_trainer_from_args(dataset_name_or_id: Union[int, str],
                           lr_scheduler_type: str = 'CosineAnnealingLR',
                           enable_early_stopping: bool = False,
                           early_stopping_patience: int = 50,
-                          early_stopping_min_delta: float = 0.0001):
+                          early_stopping_min_delta: float = 0.0001,
+                          sampling_category_weights: Optional[Dict[int, float]] = None,
+                          sampling_category_weight_mode: Optional[str] = None):
     # load nnunet class and do sanity checks
     nnunet_trainer = recursive_find_python_class(join(nnunetv2.__path__[0], "training", "nnUNetTrainer"),
                                                 trainer_name, 'nnunetv2.training.nnUNetTrainer')
@@ -55,6 +109,18 @@ def get_trainer_from_args(dataset_name_or_id: Union[int, str],
                            f'else, please move it there.')
     assert issubclass(nnunet_trainer, nnUNetTrainer), 'The requested nnunet trainer class must inherit from ' \
                                                     'nnUNetTrainer'
+
+    # optional: override sampling weights/mode at runtime (applies to this run only)
+    if sampling_category_weights is not None:
+        if hasattr(nnunet_trainer, "SAMPLING_CATEGORY_WEIGHTS"):
+            nnunet_trainer.SAMPLING_CATEGORY_WEIGHTS = sampling_category_weights
+        else:
+            print("WARNING: Trainer does not define SAMPLING_CATEGORY_WEIGHTS; ignoring --sampling_category_weights.")
+    if sampling_category_weight_mode is not None:
+        if hasattr(nnunet_trainer, "SAMPLING_CATEGORY_WEIGHT_MODE"):
+            nnunet_trainer.SAMPLING_CATEGORY_WEIGHT_MODE = sampling_category_weight_mode
+        else:
+            print("WARNING: Trainer does not define SAMPLING_CATEGORY_WEIGHT_MODE; ignoring --sampling_category_weight_mode.")
 
     # handle dataset input. If it's an ID we need to convert to int from string
     if dataset_name_or_id.startswith('Dataset'):
@@ -124,7 +190,8 @@ def cleanup_ddp():
 
 def run_ddp(rank, dataset_name_or_id, configuration, fold, tr, p, use_compressed, disable_checkpointing, c, val, pretrained_weights, npz, world_size,
             initial_lr, oversample_foreground_percent, oversample_foreground_percent_val, num_iterations_per_epoch, num_epochs, optimizer_type, lr_scheduler_type,
-            enable_early_stopping, early_stopping_patience, early_stopping_min_delta):
+            enable_early_stopping, early_stopping_patience, early_stopping_min_delta,
+            sampling_category_weights, sampling_category_weight_mode):
     setup_ddp(rank, world_size)
     torch.cuda.set_device(torch.device('cuda', dist.get_rank()))
 
@@ -138,7 +205,9 @@ def run_ddp(rank, dataset_name_or_id, configuration, fold, tr, p, use_compressed
                                            lr_scheduler_type=lr_scheduler_type,
                                            enable_early_stopping=enable_early_stopping,
                                            early_stopping_patience=early_stopping_patience,
-                                           early_stopping_min_delta=early_stopping_min_delta)
+                                           early_stopping_min_delta=early_stopping_min_delta,
+                                           sampling_category_weights=sampling_category_weights,
+                                           sampling_category_weight_mode=sampling_category_weight_mode)
     
     if disable_checkpointing:
         nnunet_trainer.disable_checkpointing = disable_checkpointing
@@ -179,7 +248,9 @@ def run_training(dataset_name_or_id: Union[str, int],
                  lr_scheduler_type: str = 'CosineAnnealingLR',
                  enable_early_stopping: bool = False,
                  early_stopping_patience: int = 50,
-                 early_stopping_min_delta: float = 0.0001):
+                 early_stopping_min_delta: float = 0.0001,
+                 sampling_category_weights: Optional[Dict[int, float]] = None,
+                 sampling_category_weight_mode: Optional[str] = None):
     if isinstance(fold, str):
         if fold != 'all':
             try:
@@ -220,7 +291,9 @@ def run_training(dataset_name_or_id: Union[str, int],
                      lr_scheduler_type,
                      enable_early_stopping,
                      early_stopping_patience,
-                     early_stopping_min_delta),
+                     early_stopping_min_delta,
+                     sampling_category_weights,
+                     sampling_category_weight_mode),
                  nprocs=num_gpus,
                  join=True)
     else:
@@ -235,7 +308,9 @@ def run_training(dataset_name_or_id: Union[str, int],
                                                lr_scheduler_type=lr_scheduler_type,
                                                enable_early_stopping=enable_early_stopping,
                                                early_stopping_patience=early_stopping_patience,
-                                               early_stopping_min_delta=early_stopping_min_delta)
+                                               early_stopping_min_delta=early_stopping_min_delta,
+                                               sampling_category_weights=sampling_category_weights,
+                                               sampling_category_weight_mode=sampling_category_weight_mode)
 
         #已經確認load pretrain weights，所以先初始化一次
         if pretrained_weights is not None:
@@ -325,6 +400,15 @@ def run_training_entry():
                         help='[OPTIONAL] Number of epochs with no improvement before stopping. Default: 50')
     parser.add_argument('--early_stopping_min_delta', type=float, default=0.0001, required=False,
                         help='[OPTIONAL] Minimum change in validation EMA pseudo Dice to qualify as improvement. Default: 0.0001')
+
+    # Sampling category upsample configuration (case-level sampling)
+    parser.add_argument('--sampling_category_weights', type=str, default=None, required=False,
+                        help='[OPTIONAL] Override SAMPLING_CATEGORY_WEIGHTS at runtime. '
+                             'Formats: "2:1:1:1" or "2,1,1,1" or "1=2,2=1,3=1,4=1" or JSON like \'{"1":2,"2":1,"3":1,"4":1}\'.')
+    parser.add_argument('--sampling_category_weight_mode', type=str, default=None, required=False,
+                        choices=['multiplier', 'target_proportion'],
+                        help='[OPTIONAL] Override SAMPLING_CATEGORY_WEIGHT_MODE at runtime. '
+                             'Choose from ["multiplier", "target_proportion"].')
     
     args = parser.parse_args()
 
@@ -342,6 +426,9 @@ def run_training_entry():
     else:
         device = torch.device('mps')
 
+    sampling_category_weights = parse_sampling_category_weights(args.sampling_category_weights) \
+        if args.sampling_category_weights is not None else None
+
     run_training(args.dataset_name_or_id, args.configuration, args.fold, args.tr, args.p, args.pretrained_weights,
                  args.num_gpus, args.use_compressed, args.npz, args.c, args.val, args.disable_checkpointing,
                  device=device,
@@ -354,7 +441,9 @@ def run_training_entry():
                  lr_scheduler_type=args.lr_scheduler,
                  enable_early_stopping=args.enable_early_stopping,
                  early_stopping_patience=args.early_stopping_patience,
-                 early_stopping_min_delta=args.early_stopping_min_delta)
+                 early_stopping_min_delta=args.early_stopping_min_delta,
+                 sampling_category_weights=sampling_category_weights,
+                 sampling_category_weight_mode=args.sampling_category_weight_mode)
 
 
 if __name__ == '__main__':

@@ -865,6 +865,21 @@ class nnUNetTrainer(object):
             also_print_to_console=True
         )
 
+        # 訓練開始前預覽前 5 筆 sampling_probabilities（含 key 與類別），方便確認抽樣機率是否有變化
+        if sampling_probabilities is None:
+            self.print_to_log_file(
+                "Sampling probabilities preview: None",
+                also_print_to_console=True
+            )
+        else:
+            n_preview = min(5, len(tr_keys))
+            preview_lines = ["Sampling probabilities preview (first %d):" % n_preview]
+            for idx in range(n_preview):
+                k = tr_keys[idx]
+                c = sampling_categories.get(k, 0) if sampling_categories is not None else 0
+                preview_lines.append("  [%d] %s | category=%s | p=%.8f" % (idx, k, str(c), float(sampling_probabilities[idx])))
+            self.print_to_log_file("\n".join(preview_lines), add_timestamp=False, also_print_to_console=True)
+
         # 若有 sampling_categories，打印各類別總數並寫入 training_log_日期時間.txt
         if sampling_categories is not None:
             from collections import Counter
