@@ -66,6 +66,10 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 class nnUNetTrainer(object):
     # 依類別加權抽樣：類別 1~4 的權重，比例 2:1:1:1。可於子類覆寫以改變比例。
     SAMPLING_CATEGORY_WEIGHTS = {1: 2, 2: 1, 3: 1, 4: 1}
+    # 抽樣權重解讀模式：
+    # - "multiplier": 權重直接套用到每個 case（類別內所有 case 權重相同）
+    # - "target_proportion": 權重解讀為目標類別抽樣比例（會自動除以該 fold 類別 case 數量）
+    SAMPLING_CATEGORY_WEIGHT_MODE = "target_proportion"
 
     def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict, unpack_dataset: bool = True,
                  device: torch.device = torch.device('cuda'),
@@ -851,6 +855,7 @@ class nnUNetTrainer(object):
             tr_keys,
             sampling_categories=sampling_categories,
             category_weights=category_weights,
+            mode=getattr(self.__class__, "SAMPLING_CATEGORY_WEIGHT_MODE", "multiplier"),
         )
 
         # 若有 sampling_categories，打印各類別總數並寫入 training_log_日期時間.txt
@@ -872,6 +877,16 @@ class nnUNetTrainer(object):
                 target_pct = ":".join("0.00%%" for _ in weight_vals)
             lines.append("Configured sampling ratio (Category 1-4 weights): %s" % ratio_str)
             lines.append("Configured sampling target proportions (normalized): %s" % target_pct)
+
+            # 校正後（依實際 sampling_probabilities 反推）的期望類別抽樣比例
+            if sampling_probabilities is not None:
+                expected_mass = {}
+                for k, p in zip(tr_keys, sampling_probabilities):
+                    c = sampling_categories.get(k, 0)
+                    expected_mass[c] = expected_mass.get(c, 0.0) + float(p)
+                expected_ids = sorted(set(expected_mass.keys()) | {1, 2, 3, 4})
+                expected_pct = ":".join("%.2f%%" % (expected_mass.get(c, 0.0) * 100.0) for c in expected_ids)
+                lines.append("Corrected expected sampling proportions (by category, from probabilities): %s" % expected_pct)
             lines.append("-" * 40)
 
             total = len(tr_keys)
