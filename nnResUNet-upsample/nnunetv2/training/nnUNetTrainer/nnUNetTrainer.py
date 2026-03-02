@@ -851,11 +851,18 @@ class nnUNetTrainer(object):
         tr_keys = list(dataset_tr.keys())
         sampling_categories = getattr(self, "sampling_categories", None)
         category_weights = getattr(self.__class__, "SAMPLING_CATEGORY_WEIGHTS", None)
+        sampling_weight_mode = getattr(self.__class__, "SAMPLING_CATEGORY_WEIGHT_MODE", "multiplier")
         sampling_probabilities = build_sampling_probabilities(
             tr_keys,
             sampling_categories=sampling_categories,
             category_weights=category_weights,
-            mode=getattr(self.__class__, "SAMPLING_CATEGORY_WEIGHT_MODE", "multiplier"),
+            mode=sampling_weight_mode,
+        )
+
+        # 記錄本次訓練使用的 sampling mode（不論是否成功啟用 sampling_probabilities）
+        self.print_to_log_file(
+            f"Sampling category weight mode: {sampling_weight_mode}",
+            also_print_to_console=True
         )
 
         # 若有 sampling_categories，打印各類別總數並寫入 training_log_日期時間.txt
@@ -877,6 +884,7 @@ class nnUNetTrainer(object):
                 target_pct = ":".join("0.00%%" for _ in weight_vals)
             lines.append("Configured sampling ratio (Category 1-4 weights): %s" % ratio_str)
             lines.append("Configured sampling target proportions (normalized): %s" % target_pct)
+            lines.append("Sampling category weight mode: %s" % sampling_weight_mode)
 
             # 校正後（依實際 sampling_probabilities 反推）的期望類別抽樣比例
             if sampling_probabilities is not None:

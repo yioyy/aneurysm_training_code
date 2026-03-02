@@ -206,7 +206,6 @@ python run_training.py Dataset001_BrainTumor 3d_fullres 0 \
 | `--enable_early_stopping` | flag | False | 啟用提前停止機制 |
 | `--early_stopping_patience` | int | 50 | 提前停止的耐心值（epoch 數） |
 | `--early_stopping_min_delta` | float | 0.0001 | 判定為改善的最小閾值 |
-
 ## 建議配置
 
 ### 快速實驗
