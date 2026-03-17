@@ -8,20 +8,8 @@ Created on Sun Apr 16 14:05:58 2023
 """
 
 import os
-import time
-import numpy as np
-import pydicom
-import glob
-import shutil
-import nibabel as nib
-import matplotlib
-import matplotlib.pyplot as plt
-import sys
-import logging
-import cv2
 import pandas as pd
 #要安裝pillow 去開啟
-from skimage import measure,color,morphology
 import json
 from collections import OrderedDict
 
@@ -30,7 +18,7 @@ path_preprocessed = 'C:/Users/user/Desktop/nnUNet/nnUNet_preprocessed/'
 path_excel = r'D:\Aneurysm資料集重新整理\林君彥AI預測\第八輪\All_case_for_nnUNet_positive_aneurysm_vessel_cutAneurysm_cropVesselPatch_combineFEMH_vessel4\excel'
 
 Task = 'DeepAneurysm'
-No_num = '137'
+No_num = '138'
 
 kfold = 100 #總共做幾fold
 json_file = os.path.join(path_preprocessed, 'Dataset' + No_num + '_' + Task, 'splits_final.json')
