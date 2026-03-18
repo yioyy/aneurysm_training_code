@@ -862,12 +862,15 @@ class nnUNetTrainer(object):
 
         # load the datasets for training and validation. Note that we always draw random samples so we really don't
         # care about distributing training cases across GPUs.
+        # num_images_properties_loading_threshold: 超過此數量才不預載 pkl
+        # 設為 10000 讓所有 properties 預載入 RAM（~8 GB for 3000 cases），
+        # 避免 24 個 worker 反覆讀取磁碟造成 I/O 瓶頸
         dataset_tr = nnUNetDataset(self.preprocessed_dataset_folder, tr_keys,
                                    folder_with_segs_from_previous_stage=self.folder_with_segs_from_previous_stage,
-                                   num_images_properties_loading_threshold=0)
+                                   num_images_properties_loading_threshold=10000)
         dataset_val = nnUNetDataset(self.preprocessed_dataset_folder, val_keys,
                                     folder_with_segs_from_previous_stage=self.folder_with_segs_from_previous_stage,
-                                    num_images_properties_loading_threshold=0)
+                                    num_images_properties_loading_threshold=10000)
         return dataset_tr, dataset_val
 
     def get_dataloaders(self):
@@ -1288,6 +1291,8 @@ class nnUNetTrainer(object):
 
         if self.has_cls_head:
             positive = batch['positives']
+            if not isinstance(positive, torch.Tensor):
+                positive = torch.from_numpy(positive)
             positive = positive.to(self.device, non_blocking=True)
 
         self.optimizer.zero_grad()
@@ -1558,6 +1563,8 @@ class nnUNetTrainer(object):
 
         if self.has_cls_head:
             positive = batch['positives']
+            if not isinstance(positive, torch.Tensor):
+                positive = torch.from_numpy(positive)
             positive = positive.to(self.device, non_blocking=True)
 
         # Autocast is a little bitch.

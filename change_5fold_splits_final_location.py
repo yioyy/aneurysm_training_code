@@ -18,7 +18,7 @@ path_preprocessed = 'C:/Users/user/Desktop/nnUNet/nnUNet_preprocessed/'
 path_excel = r'D:\Aneurysm資料集重新整理\林君彥AI預測\第八輪\All_case_for_nnUNet_positive_aneurysm_vessel_cutAneurysm_cropVesselPatch_combineFEMH_vessel4\excel'
 
 Task = 'DeepAneurysm'
-No_num = '138'
+No_num = '136'
 
 kfold = 100 #總共做幾fold
 json_file = os.path.join(path_preprocessed, 'Dataset' + No_num + '_' + Task, 'splits_final.json')

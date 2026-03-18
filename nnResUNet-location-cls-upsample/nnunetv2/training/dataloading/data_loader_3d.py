@@ -1,5 +1,4 @@
 import numpy as np
-import torch
 from nnunetv2.training.dataloading.base_data_loader import nnUNetDataLoaderBase
 from nnunetv2.training.dataloading.nnunet_dataset import nnUNetDataset
 
@@ -11,7 +10,8 @@ class nnUNetDataLoader3D(nnUNetDataLoaderBase):
         data_all = np.zeros(self.data_shape, dtype=np.float32)
         seg_all = np.zeros(self.seg_shape, dtype=np.int16)
         case_properties = []
-        positives = torch.zeros((self.seg_shape[0], self.seg_shape[1]), dtype=torch.int64)
+        # 用 numpy 避免在 background thread 裡呼叫 torch（會搶 GIL 導致多線程效能下降）
+        positives = np.zeros((self.seg_shape[0], self.seg_shape[1]), dtype=np.int64)
 
         for j, i in enumerate(selected_keys):
             # oversampling foreground will improve stability of model training, especially if many patches are empty
