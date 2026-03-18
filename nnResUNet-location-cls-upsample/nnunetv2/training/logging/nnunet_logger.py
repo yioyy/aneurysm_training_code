@@ -39,7 +39,11 @@ class nnUNetLogger(object):
             'val_fake_dice_losses': list(),
             'lrs': list(),
             'epoch_start_timestamps': list(),
-            'epoch_end_timestamps': list()
+            'epoch_end_timestamps': list(),
+            # EMA model validation metrics
+            'ema_val_losses': list(),
+            'ema_mean_fg_dice': list(),
+            'ema_dice_per_class_or_region': list(),
         }
 
         # 分類頭相關的 logging items 只在有分類頭時加入
@@ -92,8 +96,9 @@ class nnUNetLogger(object):
             self.log('train_ema_fg_dice', new_ema_pseudo_dice, epoch)
 
     def plot_progress_png(self, output_folder):
-        # we infer the epoch form our internal logging
-        epoch = min([len(i) for i in self.my_fantastic_logging.values()]) - 1  # lists of epoch 0 have len 1
+        # we infer the epoch form our internal logging（排除空 list，如 EMA 未啟用時）
+        non_empty = [len(i) for i in self.my_fantastic_logging.values() if len(i) > 0]
+        epoch = min(non_empty) - 1 if non_empty else 0  # lists of epoch 0 have len 1
         sns.set(font_scale=2.5)
         num_plots = 6 if self.has_cls_head else 5
         fig, ax_all = plt.subplots(num_plots, 1, figsize=(30, num_plots * 18))
@@ -209,3 +214,7 @@ class nnUNetLogger(object):
             for k in cls_keys:
                 if k not in self.my_fantastic_logging:
                     self.my_fantastic_logging[k] = list()
+        # 確保 EMA keys 存在（舊 checkpoint 可能沒有）
+        for k in ['ema_val_losses', 'ema_mean_fg_dice', 'ema_dice_per_class_or_region']:
+            if k not in self.my_fantastic_logging:
+                self.my_fantastic_logging[k] = list()
