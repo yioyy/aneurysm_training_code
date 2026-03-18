@@ -64,15 +64,27 @@ class nnUNetDataLoader3D(nnUNetDataLoaderBase):
 
             # classification label（僅 classifier 架構需要，純 U-Net 跳過以加速）
             if self.compute_positives:
-                lesion_all = np.sum(seg)
-                lesion_patch = np.sum(seg_all[j])
-                c_i, z_i, y_i, x_i = np.where(seg_all[j] > 0)
-                if len(z_i) > 0:
+                seg_patch = seg_all[j]  # shape: (C, Z, Y, X)
+                # 建立前景 mask：只看指定 label 或全部 > 0
+                if self.cls_foreground_labels is not None:
+                    fg_mask = np.isin(seg_patch, self.cls_foreground_labels)
+                else:
+                    fg_mask = seg_patch > 0
+
+                fg_count_patch = np.sum(fg_mask)
+                if fg_count_patch > 0:
+                    c_i, z_i, y_i, x_i = np.where(fg_mask)
                     z_long = np.max(z_i) - np.min(z_i) + 1
                     y_long = np.max(y_i) - np.min(y_i) + 1
                     x_long = np.max(x_i) - np.min(x_i) + 1
 
-                    is_positive = (lesion_patch >= lesion_all or
+                    # 同樣用指定 label 計算整張 image 的前景量
+                    if self.cls_foreground_labels is not None:
+                        fg_count_all = np.sum(np.isin(seg, self.cls_foreground_labels))
+                    else:
+                        fg_count_all = np.sum(seg > 0)
+
+                    is_positive = (fg_count_patch >= fg_count_all or
                                    z_long >= self.data_shape[2] / 2 or
                                    y_long >= self.data_shape[3] / 2 or
                                    x_long >= self.data_shape[4] / 2)

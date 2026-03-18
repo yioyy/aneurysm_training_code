@@ -20,7 +20,8 @@ class nnUNetDataLoaderBase(DataLoader):
                  probabilistic_oversampling: bool = False,
                  sampling_categories: dict = None,
                  vessel_class_weights: dict = None,
-                 compute_positives: bool = False):
+                 compute_positives: bool = False,
+                 cls_foreground_labels: list = None):
         super().__init__(data, batch_size, 1, None, True, False, True, sampling_probabilities)
         assert isinstance(data, nnUNetDataset), 'nnUNetDataLoaderBase only supports dictionaries as data'
         self.indices = list(data.keys())
@@ -31,6 +32,11 @@ class nnUNetDataLoaderBase(DataLoader):
         self.vessel_class_weights = vessel_class_weights
         # 是否計算 classification label（positives）；僅 classifier 架構需要
         self.compute_positives = compute_positives
+        # cls_foreground_labels: 分類頭判斷 positive 時只看哪些 label
+        # None → 所有 > 0 的 label 都算前景（原始行為）
+        # [1] → 只有 label==1 算前景（例如只看動脈瘤）
+        # [1, 2] → label==1 或 label==2 算前景
+        self.cls_foreground_labels = cls_foreground_labels
         # cache for _sample_vessel_voxel concatenation（避免每次重新 concatenate）
         self._vessel_concat_cache_id = None
         self._vessel_concat_cache_arr = None

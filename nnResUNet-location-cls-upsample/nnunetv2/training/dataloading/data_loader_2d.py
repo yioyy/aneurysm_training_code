@@ -103,9 +103,15 @@ class nnUNetDataLoader2D(nnUNetDataLoaderBase):
 
             # classification label（僅 classifier 架構需要，純 U-Net 跳過以加速）
             if self.compute_positives:
-                lesion_patch = np.sum(seg_all[j])
-                c_i, y_i, x_i = np.where(seg_all[j] > 0)
-                if len(y_i) > 0:
+                seg_patch = seg_all[j]  # shape: (C, Y, X)
+                if self.cls_foreground_labels is not None:
+                    fg_mask = np.isin(seg_patch, self.cls_foreground_labels)
+                else:
+                    fg_mask = seg_patch > 0
+
+                fg_count_patch = np.sum(fg_mask)
+                if fg_count_patch > 0:
+                    c_i, y_i, x_i = np.where(fg_mask)
                     y_long = np.max(y_i) - np.min(y_i) + 1
                     x_long = np.max(x_i) - np.min(x_i) + 1
 

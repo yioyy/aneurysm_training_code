@@ -95,6 +95,12 @@ class nnUNetTrainer(object):
     ENABLE_EMA = False
     EMA_DECAY = 0.999
 
+    # 分類頭判斷 positive 時只看哪些 seg label
+    # None → 所有 > 0 的 label 都算前景（原始行為，適用 2 分類）
+    # [1] → 只有 label==1 算前景（multi-label 時只看動脈瘤）
+    # [1, 2] → label==1 或 2 算前景
+    CLS_FOREGROUND_LABELS = None
+
     def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict, unpack_dataset: bool = True,
                  device: torch.device = torch.device('cuda'),
                  initial_lr: float = 1e-4,
@@ -1040,10 +1046,16 @@ class nnUNetTrainer(object):
             )
 
         compute_positives = getattr(self, "has_cls_head", False)
+        cls_foreground_labels = getattr(self, "CLS_FOREGROUND_LABELS", None)
         self.print_to_log_file(
             f"compute_positives={compute_positives} (僅 classifier 架構才計算 positives label)",
             also_print_to_console=True
         )
+        if cls_foreground_labels is not None:
+            self.print_to_log_file(
+                f"CLS_FOREGROUND_LABELS={cls_foreground_labels} (分類頭只看這些 label 判斷 positive)",
+                also_print_to_console=True
+            )
 
         if dim == 2:
             dl_tr = nnUNetDataLoader2D(dataset_tr, self.batch_size,
@@ -1054,7 +1066,8 @@ class nnUNetTrainer(object):
                                        sampling_probabilities=sampling_probabilities, pad_sides=None,
                                        sampling_categories=sampling_categories,
                                        vessel_class_weights=vessel_class_weights,
-                                       compute_positives=compute_positives)
+                                       compute_positives=compute_positives,
+                                       cls_foreground_labels=cls_foreground_labels)
             dl_val = nnUNetDataLoader2D(dataset_val, self.batch_size,
                                         self.configuration_manager.patch_size,
                                         self.configuration_manager.patch_size,
@@ -1063,7 +1076,8 @@ class nnUNetTrainer(object):
                                         sampling_probabilities=None, pad_sides=None,
                                         sampling_categories=sampling_categories,
                                         vessel_class_weights=vessel_class_weights,
-                                        compute_positives=compute_positives)
+                                        compute_positives=compute_positives,
+                                        cls_foreground_labels=cls_foreground_labels)
         else:
             dl_tr = nnUNetDataLoader3D(dataset_tr, self.batch_size,
                                        initial_patch_size,
@@ -1073,7 +1087,8 @@ class nnUNetTrainer(object):
                                        sampling_probabilities=sampling_probabilities, pad_sides=None,
                                        sampling_categories=sampling_categories,
                                        vessel_class_weights=vessel_class_weights,
-                                       compute_positives=compute_positives)
+                                       compute_positives=compute_positives,
+                                       cls_foreground_labels=cls_foreground_labels)
             dl_val = nnUNetDataLoader3D(dataset_val, self.batch_size,
                                         self.configuration_manager.patch_size,
                                         self.configuration_manager.patch_size,

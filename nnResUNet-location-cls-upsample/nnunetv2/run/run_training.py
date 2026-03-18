@@ -105,7 +105,8 @@ def get_trainer_from_args(dataset_name_or_id: Union[int, str],
                           enable_vessel_upsample: bool = False,
                           enable_deep_supervision_logging: bool = False,
                           enable_ema: bool = False,
-                          ema_decay: float = 0.999):
+                          ema_decay: float = 0.999,
+                          cls_foreground_labels: Optional[list] = None):
     # load nnunet class and do sanity checks
     nnunet_trainer = recursive_find_python_class(join(nnunetv2.__path__[0], "training", "nnUNetTrainer"),
                                                 trainer_name, 'nnunetv2.training.nnUNetTrainer')
@@ -146,6 +147,9 @@ def get_trainer_from_args(dataset_name_or_id: Union[int, str],
         print('CLI: ENABLE_DEEP_SUPERVISION_LOGGING = True (啟用每層 deep supervision logging)')
     if enable_ema:
         print(f'CLI: ENABLE_EMA = True (啟用 EMA model, decay={ema_decay})')
+    if cls_foreground_labels is not None:
+        nnunet_trainer.CLS_FOREGROUND_LABELS = cls_foreground_labels
+        print(f'CLI: CLS_FOREGROUND_LABELS = {cls_foreground_labels} (分類頭只看這些 label 判斷 positive)')
 
     # handle dataset input. If it's an ID we need to convert to int from string
     if dataset_name_or_id.startswith('Dataset'):
@@ -224,7 +228,8 @@ def run_ddp(rank, dataset_name_or_id, configuration, fold, tr, p, use_compressed
             region_loss_weights, vessel_class_weights,
             enable_sampling_weights, enable_vessel_upsample,
             enable_deep_supervision_logging,
-            enable_ema, ema_decay):
+            enable_ema, ema_decay,
+            cls_foreground_labels):
     setup_ddp(rank, world_size)
     torch.cuda.set_device(torch.device('cuda', dist.get_rank()))
 
@@ -247,7 +252,8 @@ def run_ddp(rank, dataset_name_or_id, configuration, fold, tr, p, use_compressed
                                            enable_vessel_upsample=enable_vessel_upsample,
                                            enable_deep_supervision_logging=enable_deep_supervision_logging,
                                            enable_ema=enable_ema,
-                                           ema_decay=ema_decay)
+                                           ema_decay=ema_decay,
+                                           cls_foreground_labels=cls_foreground_labels)
 
     if disable_checkpointing:
         nnunet_trainer.disable_checkpointing = disable_checkpointing
@@ -297,7 +303,8 @@ def run_training(dataset_name_or_id: Union[str, int],
                  enable_vessel_upsample: bool = False,
                  enable_deep_supervision_logging: bool = False,
                  enable_ema: bool = False,
-                 ema_decay: float = 0.999):
+                 ema_decay: float = 0.999,
+                 cls_foreground_labels: Optional[list] = None):
     if isinstance(fold, str):
         if fold != 'all':
             try:
@@ -347,7 +354,8 @@ def run_training(dataset_name_or_id: Union[str, int],
                      enable_vessel_upsample,
                      enable_deep_supervision_logging,
                      enable_ema,
-                     ema_decay),
+                     ema_decay,
+                     cls_foreground_labels),
                  nprocs=num_gpus,
                  join=True)
     else:
@@ -371,7 +379,8 @@ def run_training(dataset_name_or_id: Union[str, int],
                                                enable_vessel_upsample=enable_vessel_upsample,
                                                enable_deep_supervision_logging=enable_deep_supervision_logging,
                                                enable_ema=enable_ema,
-                                               ema_decay=ema_decay)
+                                               ema_decay=ema_decay,
+                                               cls_foreground_labels=cls_foreground_labels)
 
         #已經確認load pretrain weights，所以先初始化一次
         if pretrained_weights is not None:
@@ -506,6 +515,13 @@ def run_training_entry():
     parser.add_argument('--ema_decay', type=float, default=0.999, required=False,
                         help='[OPTIONAL] EMA decay factor. Higher = smoother/slower update. Default: 0.999')
 
+    # 分類頭前景 label 設定
+    parser.add_argument('--cls_foreground_labels', type=str, default=None, required=False,
+                        help='[OPTIONAL] Classifier head foreground labels. Comma-separated ints, e.g. "1" or "1,2". '
+                             'Only these seg label values count as positive for the classifier head. '
+                             'Default: None (all labels > 0 are foreground, suitable for 2-class). '
+                             'For multi-label, set to aneurysm label(s) only, e.g. "1".')
+
     args = parser.parse_args()
 
     assert args.device in ['cpu', 'cuda', 'mps'], f'-device must be either cpu, mps or cuda. Other devices are not tested/supported. Got: {args.device}.'
@@ -538,6 +554,11 @@ def run_training_entry():
             k, v = pair.strip().split('=')
             vessel_class_weights[int(k)] = float(v)
 
+    # 解析 cls_foreground_labels: "1" -> [1], "1,2" -> [1, 2]
+    cls_foreground_labels = None
+    if args.cls_foreground_labels is not None:
+        cls_foreground_labels = [int(x.strip()) for x in args.cls_foreground_labels.split(',')]
+
     run_training(args.dataset_name_or_id, args.configuration, args.fold, args.tr, args.p, args.pretrained_weights,
                  args.num_gpus, args.use_compressed, args.npz, args.c, args.val, args.disable_checkpointing,
                  device=device,
@@ -559,7 +580,8 @@ def run_training_entry():
                  enable_vessel_upsample=args.enable_vessel_upsample,
                  enable_deep_supervision_logging=args.enable_deep_supervision_logging,
                  enable_ema=args.enable_ema,
-                 ema_decay=args.ema_decay)
+                 ema_decay=args.ema_decay,
+                 cls_foreground_labels=cls_foreground_labels)
 
 
 if __name__ == '__main__':
