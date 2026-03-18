@@ -100,7 +100,9 @@ class nnUNetLogger(object):
         non_empty = [len(i) for i in self.my_fantastic_logging.values() if len(i) > 0]
         epoch = min(non_empty) - 1 if non_empty else 0  # lists of epoch 0 have len 1
         sns.set(font_scale=2.5)
-        num_plots = 6 if self.has_cls_head else 5
+        # 判斷是否有 deep supervision logging 資料
+        has_ds_logging = len(self.my_fantastic_logging.get('train_ce_losses', [])) > 0
+        num_plots = 2 + (3 if has_ds_logging else 0) + (1 if self.has_cls_head else 0)
         fig, ax_all = plt.subplots(num_plots, 1, figsize=(30, num_plots * 18))
         # regular progress.png as we are used to from previous nnU-Net versions
         ax = ax_all[0]
@@ -128,49 +130,53 @@ class nnUNetLogger(object):
         ax.legend(loc=(0, 1))
         ax2.legend(loc=(0.2, 1))
 
-        #第二格改成只看dice，不然原圖會太亂
-        ax = ax_all[1]
-        x_values = list(range(epoch + 1))
-        # Dynamically plot deep supervision dice for all levels
+        plot_idx = 1
         train_colors = ['b', 'cyan', 'purple', 'g', 'y', 'pink', 'brown', 'gray']
         val_colors = ['r', 'orange', 'magenta', 'darkred', 'olive', 'navy', 'teal', 'black']
-        for i in range(self.num_deep_supervision_levels):
-            train_color = train_colors[i % len(train_colors)]
-            ax.plot(x_values, self.my_fantastic_logging[f'train_supervision_dice{i}'][:epoch + 1],
-                   color=train_color, ls='-', label=f"train deep_supervision dice{i}", linewidth=4)
-        for i in range(self.num_deep_supervision_levels):
-            val_color = val_colors[i % len(val_colors)]
-            ax.plot(x_values, self.my_fantastic_logging[f'val_supervision_dice{i}'][:epoch + 1],
-                   color=val_color, ls='-', label=f"val deep_supervision dice{i}", linewidth=4)
-        ax.set_xlabel("epoch")
-        ax.set_ylabel("pseudo dice")
-        ax.legend(loc=(0, 1))
 
-        ax = ax_all[2]
-        x_values = list(range(epoch + 1))
-        # Dynamically plot dice losses for all levels
-        for i in range(self.num_deep_supervision_levels):
-            train_color = train_colors[i % len(train_colors)]
-            ax.plot(x_values, self.my_fantastic_logging[f'train_dice_loss{i}'][:epoch + 1],
-                   color=train_color, ls='-', label=f"train_dice_loss{i}", linewidth=4)
-        for i in range(self.num_deep_supervision_levels):
-            val_color = val_colors[i % len(val_colors)]
-            ax.plot(x_values, self.my_fantastic_logging[f'val_dice_loss{i}'][:epoch + 1],
-                   color=val_color, ls='-', label=f"val_dice_loss{i}", linewidth=4)
-        ax.set_xlabel("epoch")
-        ax.set_ylabel("loss")
-        ax.legend(loc=(0, 1))
+        # deep supervision 相關圖表（僅在 enable_deep_supervision_logging 時才有資料）
+        if has_ds_logging:
+            #第二格：deep supervision dice
+            ax = ax_all[plot_idx]
+            x_values = list(range(epoch + 1))
+            for i in range(self.num_deep_supervision_levels):
+                train_color = train_colors[i % len(train_colors)]
+                ax.plot(x_values, self.my_fantastic_logging[f'train_supervision_dice{i}'][:epoch + 1],
+                       color=train_color, ls='-', label=f"train deep_supervision dice{i}", linewidth=4)
+            for i in range(self.num_deep_supervision_levels):
+                val_color = val_colors[i % len(val_colors)]
+                ax.plot(x_values, self.my_fantastic_logging[f'val_supervision_dice{i}'][:epoch + 1],
+                       color=val_color, ls='-', label=f"val deep_supervision dice{i}", linewidth=4)
+            ax.set_xlabel("epoch")
+            ax.set_ylabel("pseudo dice")
+            ax.legend(loc=(0, 1))
+            plot_idx += 1
 
-        #第三格改成只看ce_loss，不然原圖loss太小看不出變化
-        ax = ax_all[3]
-        x_values = list(range(epoch + 1))
-        ax.plot(x_values, self.my_fantastic_logging['train_ce_losses'][:epoch + 1], color='cyan', ls='-', label="ce_loss_tr", linewidth=4)
-        ax.plot(x_values, self.my_fantastic_logging['val_ce_losses'][:epoch + 1], color='orange', ls='-', label="ce_loss_val", linewidth=4)
-        ax.set_xlabel("epoch")
-        ax.set_ylabel("loss")
-        ax.legend(loc=(0, 1))
+            #第三格：dice losses per level
+            ax = ax_all[plot_idx]
+            x_values = list(range(epoch + 1))
+            for i in range(self.num_deep_supervision_levels):
+                train_color = train_colors[i % len(train_colors)]
+                ax.plot(x_values, self.my_fantastic_logging[f'train_dice_loss{i}'][:epoch + 1],
+                       color=train_color, ls='-', label=f"train_dice_loss{i}", linewidth=4)
+            for i in range(self.num_deep_supervision_levels):
+                val_color = val_colors[i % len(val_colors)]
+                ax.plot(x_values, self.my_fantastic_logging[f'val_dice_loss{i}'][:epoch + 1],
+                       color=val_color, ls='-', label=f"val_dice_loss{i}", linewidth=4)
+            ax.set_xlabel("epoch")
+            ax.set_ylabel("loss")
+            ax.legend(loc=(0, 1))
+            plot_idx += 1
 
-        plot_idx = 4
+            #第四格：ce_loss
+            ax = ax_all[plot_idx]
+            x_values = list(range(epoch + 1))
+            ax.plot(x_values, self.my_fantastic_logging['train_ce_losses'][:epoch + 1], color='cyan', ls='-', label="ce_loss_tr", linewidth=4)
+            ax.plot(x_values, self.my_fantastic_logging['val_ce_losses'][:epoch + 1], color='orange', ls='-', label="ce_loss_val", linewidth=4)
+            ax.set_xlabel("epoch")
+            ax.set_ylabel("loss")
+            ax.legend(loc=(0, 1))
+            plot_idx += 1
         #第四格：分類器 accuracy / sensitivity / specificity（僅在有分類頭時）
         if self.has_cls_head:
             ax = ax_all[plot_idx]
