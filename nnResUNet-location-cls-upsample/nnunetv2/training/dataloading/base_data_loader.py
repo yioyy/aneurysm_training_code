@@ -169,14 +169,25 @@ class nnUNetDataLoaderBase(DataLoader):
 
     def _sample_vessel_voxel(self, vessel_locations):
         """
-        從 vessel_locations (dict {label: locs} 或 None) 中取樣一個 voxel。
+        從 vessel_locations 中取樣一個 voxel。
 
-        - vessel_locations 為 None → return None（隨機採樣）
-        - vessel_class_weights 為 None（非 upsample）→ 所有類別座標合併，隨機取樣（等同原始行為）
-        - vessel_class_weights 有值（upsample 模式）→ 先按權重選類別，再從該類別座標中隨機取
-          e.g. {1:1, 2:1, 3:1, 4:1} → 每類 25% 機率被選到
+        支援兩種格式（自動偵測）：
+        - 舊格式：numpy.ndarray, shape (N, 4)，直接隨機取樣
+        - 新格式：dict {label: ndarray}，支援 upsample 模式
+
+        回傳 None 則由呼叫端改用隨機採樣。
         """
-        if vessel_locations is None or len(vessel_locations) == 0:
+        if vessel_locations is None:
+            return None
+
+        # 舊格式：直接是 numpy array (N, 4)
+        if isinstance(vessel_locations, np.ndarray):
+            if len(vessel_locations) == 0:
+                return None
+            return vessel_locations[np.random.choice(len(vessel_locations))]
+
+        # 新格式：dict {label: ndarray}
+        if len(vessel_locations) == 0:
             return None
 
         if self.vessel_class_weights is None:
