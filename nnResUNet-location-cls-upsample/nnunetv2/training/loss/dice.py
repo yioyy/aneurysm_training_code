@@ -172,7 +172,10 @@ class MemoryEfficientSoftDiceLoss(nn.Module):
 
         if self.channel_weights is not None:
             w = self.channel_weights.to(dc.device)
-            dc = (dc * w).sum() / w.sum()
+            # 只對 channel 維度（最後一維）做加權平均，再對 batch 維度取平均
+            dc = (dc * w).sum(-1) / w.sum()
+            if dc.ndim > 0:
+                dc = dc.mean()
         else:
             dc = dc.mean()
         return -dc
@@ -239,7 +242,10 @@ class MemoryEfficientNewSoftDiceLoss(nn.Module):
 
         if self.channel_weights is not None:
             w = self.channel_weights.to(dc.device)
-            dc = (dc * w).sum() / w.sum()
+            # 只對 channel 維度（最後一維）做加權平均，再對 batch 維度取平均
+            dc = (dc * w).sum(-1) / w.sum()
+            if dc.ndim > 0:
+                dc = dc.mean()
         else:
             dc = dc.mean()
         return 1 - dc
