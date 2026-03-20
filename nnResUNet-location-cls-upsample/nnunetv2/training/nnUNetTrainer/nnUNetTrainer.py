@@ -101,6 +101,12 @@ class nnUNetTrainer(object):
     # [1, 2] → label==1 或 2 算前景
     CLS_FOREGROUND_LABELS = None
 
+    # Best checkpoint 根據哪幾個 class 的 dice 來判斷
+    # None → 所有 foreground class 的平均（原始行為）
+    # [4] → 只看第 5 個 class（0-indexed，例如 Aneurysm）
+    # [0, 4] → 只看第 1 和第 5 個 class 的平均
+    BEST_VAL_CLASSES = None
+
     def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict, unpack_dataset: bool = True,
                  device: torch.device = torch.device('cuda'),
                  initial_lr: float = 1e-4,
@@ -1931,18 +1937,35 @@ class nnUNetTrainer(object):
         if (current_epoch + 1) % self.save_every == 0 and current_epoch != (self.num_epochs - 1):
             self.save_checkpoint(join(self.output_folder, 'checkpoint_latest.pth'))
 
-        # handle 'best' checkpointing. ema_fg_dice is computed by the logger and can be accessed like this
-        if self._best_ema is None or self.logger.my_fantastic_logging['ema_fg_dice'][-1] > self._best_ema:
-            self._best_ema = self.logger.my_fantastic_logging['ema_fg_dice'][-1]
-            self.print_to_log_file(f"Yayy! New best val EMA pseudo Dice: {np.round(self._best_ema, decimals=4)}")
+        # handle 'best' checkpointing
+        # 如果指定了 BEST_VAL_CLASSES，根據指定 class 的 dice 判斷 best；否則用全類別 ema_fg_dice
+        best_val_classes = getattr(self, 'BEST_VAL_CLASSES', None)
+        if best_val_classes is not None:
+            dice_per_class = self.logger.my_fantastic_logging['dice_per_class_or_region'][-1]
+            selected_dice = [dice_per_class[c] for c in best_val_classes if c < len(dice_per_class)]
+            best_val_metric = np.nanmean(selected_dice) if len(selected_dice) > 0 else 0.0
+            metric_label = f"val Pseudo Dice (classes {best_val_classes})"
+        else:
+            best_val_metric = self.logger.my_fantastic_logging['ema_fg_dice'][-1]
+            metric_label = "val EMA pseudo Dice"
+
+        if self._best_ema is None or best_val_metric > self._best_ema:
+            self._best_ema = best_val_metric
+            self.print_to_log_file(f"Yayy! New best {metric_label}: {np.round(self._best_ema, decimals=4)}")
             self.save_checkpoint(join(self.output_folder, 'checkpoint_best.pth'))
 
         # handle EMA model 'best' checkpointing
-        if self.ENABLE_EMA and 'ema_mean_fg_dice' in self.logger.my_fantastic_logging:
-            ema_dice = self.logger.my_fantastic_logging['ema_mean_fg_dice'][-1]
-            if self._best_ema_model_dice is None or ema_dice > self._best_ema_model_dice:
-                self._best_ema_model_dice = ema_dice
-                self.print_to_log_file(f"New best EMA model val Pseudo Dice: {np.round(self._best_ema_model_dice, decimals=4)}")
+        if self.ENABLE_EMA and 'ema_dice_per_class_or_region' in self.logger.my_fantastic_logging and \
+                len(self.logger.my_fantastic_logging['ema_dice_per_class_or_region']) > 0:
+            if best_val_classes is not None:
+                ema_dpc = self.logger.my_fantastic_logging['ema_dice_per_class_or_region'][-1]
+                selected = [ema_dpc[c] for c in best_val_classes if c < len(ema_dpc)]
+                ema_best_metric = np.nanmean(selected) if len(selected) > 0 else 0.0
+            else:
+                ema_best_metric = self.logger.my_fantastic_logging['ema_mean_fg_dice'][-1]
+            if self._best_ema_model_dice is None or ema_best_metric > self._best_ema_model_dice:
+                self._best_ema_model_dice = ema_best_metric
+                self.print_to_log_file(f"New best EMA model {metric_label}: {np.round(self._best_ema_model_dice, decimals=4)}")
                 self._save_ema_checkpoint(join(self.output_folder, 'checkpoint_best_ema.pth'))
 
         if self.local_rank == 0:
