@@ -245,7 +245,7 @@ import torch.nn.functional as F
 
 def predict_sliding_window_return_logits(network: nn.Module,
                                          input_image: Union[np.ndarray, torch.Tensor],
-                                         vessel_image: Union[np.ndarray, torch.Tensor],
+                                         normal_image: Union[np.ndarray, torch.Tensor],
                                          num_segmentation_heads: int,
                                          tile_size: Tuple[int, ...],
                                          mirror_axes: Tuple[int, ...] = None,
@@ -292,12 +292,12 @@ def predict_sliding_window_return_logits(network: nn.Module,
 
             # if input_image is smaller than tile_size we need to pad it to tile_size.
             data, slicer_revert_padding = pad_nd_image(input_image, tile_size, 'constant', {'value': 0}, True, None)
-            #data_vessel, slicer_revert_padding = pad_nd_image(vessel_image, data.shape, 'constant', {'value': 0}, True, None)
+            #data_normal, slicer_revert_padding = pad_nd_image(normal_image, data.shape, 'constant', {'value': 0}, True, None)
             
             # 計算需要補齊的大小:tensorA = torch.randn(1, 127, 512, 512)  # 假設是 tensorA
-            pad_height = (data.shape[2] - vessel_image.shape[2])  # 需要補齊的高度 (上和下)
-            pad_width = (data.shape[3] - vessel_image.shape[3])  # 需要補齊的寬度 (左和右)
-            pad_depth = (data.shape[1] - vessel_image.shape[1])  # 需要補齊的深度 (前和後)
+            pad_height = (data.shape[2] - normal_image.shape[2])  # 需要補齊的高度 (上和下)
+            pad_width = (data.shape[3] - normal_image.shape[3])  # 需要補齊的寬度 (左和右)
+            pad_depth = (data.shape[1] - normal_image.shape[1])  # 需要補齊的深度 (前和後)
 
             # 計算每一維的補齊值
             # pad順序為 (左, 右, 上, 下, 前, 後)
@@ -306,12 +306,12 @@ def predict_sliding_window_return_logits(network: nn.Module,
                        pad_depth, 0)  # 寬度（左右）
             
             # 使用 F.pad 進行補齊
-            data_vessel = F.pad(vessel_image, padding, mode='constant', value=0)
+            data_normal = F.pad(normal_image, padding, mode='constant', value=0)
                         
             print("step_size:", tile_step_size) #0.5 => 步距重疊率
             print("mirror_axes:", mirror_axes) #還是0
             print('data pad後的大小:', data.shape) #這邊還是512
-            print('data_vessel pad後的大小:', data_vessel.shape) #這邊還是512
+            print('data_normal pad後的大小:', data_normal.shape) #這邊還是512
 
             if use_gaussian:
                 gaussian = torch.from_numpy(
@@ -354,21 +354,21 @@ def predict_sliding_window_return_logits(network: nn.Module,
                 slicers_to_process = []
                 
                 for sl in slicers:
-                    #只預測有血管的地方
-                    if torch.sum(data_vessel[sl]) > 0:
+                    #只預測有 normal mask 的地方
+                    if torch.sum(data_normal[sl]) > 0:
                         workon = data[sl][None]
                         patches_to_process.append(workon)
                         slicers_to_process.append(sl)
                     else:
-                        # 對於沒有血管的地方，直接設置為零
+                        # 對於沒有 normal mask 的地方，直接設置為零
                         prediction = torch.zeros((num_segmentation_heads, *tile_size)).to(results_device)
                         predicted_logits[sl] += prediction * gaussian
                         n_predictions[sl[1:]] += gaussian
                 
-                # 批次處理有血管的 patches
+                # 批次處理有 normal mask 的 patches
                 if len(patches_to_process) > 0:
                     if verbose:
-                        print(f"[Gaussian模式] 處理 {len(patches_to_process)} 個有血管的 patches，使用 batch_size={batch_size}")
+                        print(f"[Gaussian模式] 處理 {len(patches_to_process)} 個有 normal mask 的 patches，使用 batch_size={batch_size}")
                     
                     for i in range(0, len(patches_to_process), batch_size):
                         batch_end = min(i + batch_size, len(patches_to_process))
@@ -393,14 +393,14 @@ def predict_sliding_window_return_logits(network: nn.Module,
                             predicted_logits[sl] += prediction * gaussian
                             n_predictions[sl[1:]] += gaussian
             else:
-                # 不使用 gaussian 權重的情況：可以完全跳過沒有血管的區域，大幅加速
+                # 不使用 gaussian 權重的情況：可以完全跳過沒有 normal mask 的區域，大幅加速
                 patches_to_process = []
                 slicers_to_process = []
                 all_slicers = list(slicers)  # 先轉換成 list 以便重複使用
                 
-                # 只收集有血管的 patches，完全跳過空白區域
+                # 只收集有 normal mask 的 patches，完全跳過空白區域
                 for sl in all_slicers:
-                    if torch.sum(data_vessel[sl]) > 0:
+                    if torch.sum(data_normal[sl]) > 0:
                         workon = data[sl][None]
                         patches_to_process.append(workon)
                         slicers_to_process.append(sl)
@@ -408,7 +408,7 @@ def predict_sliding_window_return_logits(network: nn.Module,
                 if len(patches_to_process) > 0:
                     if verbose:
                         total_patches = len(all_slicers)
-                        print(f"[非Gaussian模式] 跳過 {total_patches - len(patches_to_process)} 個空白 patches，只處理 {len(patches_to_process)} 個有血管的 patches，使用 batch_size={batch_size}")
+                        print(f"[非Gaussian模式] 跳過 {total_patches - len(patches_to_process)} 個空白 patches，只處理 {len(patches_to_process)} 個有 normal mask 的 patches，使用 batch_size={batch_size}")
                     
                     for i in range(0, len(patches_to_process), batch_size):
                         batch_end = min(i + batch_size, len(patches_to_process))
@@ -432,7 +432,7 @@ def predict_sliding_window_return_logits(network: nn.Module,
                             predicted_logits[sl] += prediction
                             n_predictions[sl[1:]] += 1
                 
-                # 對於完全沒有血管的區域，設置一個預設的背景預測
+                # 對於完全沒有 normal mask 的區域，設置一個預設的背景預測
                 # 這樣可以避免這些區域保持未初始化狀態
                 if len(patches_to_process) < len(all_slicers):
                     # 創建背景預測：[1.0, 0.0] 表示背景類別的機率為 1
@@ -440,7 +440,7 @@ def predict_sliding_window_return_logits(network: nn.Module,
                     background_prediction[0] = 1.0  # 背景類別設為 1
                     
                     for sl in all_slicers:
-                        if torch.sum(data_vessel[sl]) == 0:  # 沒有血管的區域
+                        if torch.sum(data_normal[sl]) == 0:  # 沒有 normal mask 的區域
                             predicted_logits[sl] += background_prediction
                             n_predictions[sl[1:]] += 1
 
@@ -456,22 +456,22 @@ def predict_sliding_window_return_logits(network: nn.Module,
                 total_voxels = torch.numel(n_predictions)
                 if zero_predictions > 0:
                     print(f"警告：有 {zero_predictions}/{total_voxels} 個體素沒有被任何 patch 覆蓋到")
-                    print(f"這些位置將保持為零值（通常是影像邊緣或完全沒有血管的區域）")
-            #print('predicted_logits.shape:', predicted_logits.shape, ' data_vessel.shape:', data_vessel.shape)
-            #predicted_logits.shape: torch.Size([2, 127, 512, 512])  data_vessel.shape: torch.Size([1, 127, 512, 512])
+                    print(f"這些位置將保持為零值（通常是影像邊緣或完全沒有 normal mask 的區域）")
+            #print('predicted_logits.shape:', predicted_logits.shape, ' data_normal.shape:', data_normal.shape)
+            #predicted_logits.shape: torch.Size([2, 127, 512, 512])  data_normal.shape: torch.Size([1, 127, 512, 512])
             
-            #只與vessel相乘
-            #print('predicted_logits.shape:', predicted_logits.shape, ' data_vessel.shape:', data_vessel.shape)
-            #predicted_logits = predicted_logits[1, :, :, :] * data_vessel.to(results_device)
+            #只與 normal mask 相乘
+            #print('predicted_logits.shape:', predicted_logits.shape, ' data_normal.shape:', data_normal.shape)
+            #predicted_logits = predicted_logits[1, :, :, :] * data_normal.to(results_device)
             #print('predicted_logits.shape:', predicted_logits.shape)
             # 使用 unsqueeze 增加一個維度，放在最前面
             #predicted_logits = predicted_logits[0, :, :, :].unsqueeze(0)
-            #predicted_logits = data_vessel.to(results_device)
+            #predicted_logits = data_normal.to(results_device)
                         
-            #與vessel相乘
-            repeat_vessel = data_vessel.repeat(2, 1, 1, 1)
-            predicted_logits = predicted_logits * repeat_vessel.to(results_device)
-            #predicted_logits = repeat_vessel.to(results_device)            
+            #與 normal mask 相乘
+            repeat_normal = data_normal.repeat(2, 1, 1, 1)
+            predicted_logits = predicted_logits * repeat_normal.to(results_device)
+            #predicted_logits = repeat_normal.to(results_device)            
 
     empty_cache(device)
     return predicted_logits[tuple([slice(None), *slicer_revert_padding[1:]])]
@@ -490,7 +490,7 @@ def write_probabilities(seg, output_fname, img_nii):
 
 #輸出結果，最需要改的地方2
 def export_prediction_probabilities(predicted_array_or_file: Union[np.ndarray, str], properties_dict: dict,
-                                    vessel_image, img_nii,
+                                    normal_image, img_nii,
                                     configuration_manager: ConfigurationManager,
                                     plans_manager: PlansManager,
                                     dataset_json_dict_or_file: Union[dict, str], output_file_truncated: str,
@@ -747,8 +747,8 @@ def predict_from_raw_data(list_of_lists_or_source_folder: Union[str, List[List[s
             for preprocessed, nii_path in zip(mta, list_of_lists_or_source_folder):
                 start_time = time.time()
                 data = preprocessed['data']
-                data_vessel = preprocessed['seg']
-                #print('data:', data.shape, 'data_vessel:', data_vessel.shape)
+                data_normal = preprocessed['seg']
+                #print('data:', data.shape, 'data_normal:', data_normal.shape)
                 #讀取nifti只是為了affine
                 img_nii = nib.load(str(nii_path[0]))
                 if isinstance(data, str):
@@ -756,8 +756,8 @@ def predict_from_raw_data(list_of_lists_or_source_folder: Union[str, List[List[s
                     data = torch.from_numpy(np.load(data))
                     os.remove(delfile)
                 
-                if isinstance(data_vessel, str):
-                    data_vessel = torch.from_numpy(np.load(data_vessel))
+                if isinstance(data_normal, str):
+                    data_normal = torch.from_numpy(np.load(data_normal))
 
                 ofile = preprocessed['ofile']
                 print(f'\nPredicting {os.path.basename(ofile)}:')
@@ -785,7 +785,7 @@ def predict_from_raw_data(list_of_lists_or_source_folder: Union[str, List[List[s
                             network.load_state_dict(params)
                             if prediction is None:
                                 prediction = predict_sliding_window_return_logits(
-                            network, data, data_vessel, num_seg_heads,
+                            network, data, data_normal, num_seg_heads,
                             configuration_manager.patch_size,
                             mirror_axes=inference_allowed_mirroring_axes if use_mirroring else None,
                             tile_step_size=tile_step_size,
@@ -798,7 +798,7 @@ def predict_from_raw_data(list_of_lists_or_source_folder: Union[str, List[List[s
                             has_classifier_output=has_classifier_output)
                             else:
                                 prediction += predict_sliding_window_return_logits(
-                                    network, data, data_vessel, num_seg_heads,
+                                    network, data, data_normal, num_seg_heads,
                                     configuration_manager.patch_size,
                                     mirror_axes=inference_allowed_mirroring_axes if use_mirroring else None,
                                     tile_step_size=tile_step_size,
@@ -826,7 +826,7 @@ def predict_from_raw_data(list_of_lists_or_source_folder: Union[str, List[List[s
                         network.load_state_dict(params)
                         if prediction is None:
                             prediction = predict_sliding_window_return_logits(
-                                network, data, data_vessel, num_seg_heads,
+                                network, data, data_normal, num_seg_heads,
                                 configuration_manager.patch_size,
                                 mirror_axes=inference_allowed_mirroring_axes if use_mirroring else None,
                                 tile_step_size=tile_step_size,
@@ -839,7 +839,7 @@ def predict_from_raw_data(list_of_lists_or_source_folder: Union[str, List[List[s
                                 has_classifier_output=has_classifier_output)
                         else:
                             prediction += predict_sliding_window_return_logits(
-                                network, data, data_vessel, num_seg_heads,
+                                network, data, data_normal, num_seg_heads,
                                 configuration_manager.patch_size,
                                 mirror_axes=inference_allowed_mirroring_axes if use_mirroring else None,
                                 tile_step_size=tile_step_size,
@@ -878,7 +878,7 @@ def predict_from_raw_data(list_of_lists_or_source_folder: Union[str, List[List[s
                 print(f'done with {os.path.basename(ofile)}')
                 """
                 print(f"[Done] spend {time.time() - start_time:.2f} sec")
-                export_prediction_probabilities(prediction, properties, data_vessel, img_nii, configuration_manager, plans_manager,
+                export_prediction_probabilities(prediction, properties, data_normal, img_nii, configuration_manager, plans_manager,
                                                 dataset_json, ofile, save_probabilities)
                 
                 print(f"[Done] spend {time.time() - start_time:.2f} sec")

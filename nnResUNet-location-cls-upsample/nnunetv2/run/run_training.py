@@ -59,7 +59,7 @@ def parse_sampling_category_weights(raw: str) -> Dict[int, float]:
             out[int(k_str)] = float(v_str)
         return out
 
-    # ratio list -> map to 1..N (expects 4 for vessel 4-class use)
+    # ratio list -> map to 1..N (expects 4 for normal 4-class use)
     parts = [p.strip() for p in s.replace(":", ",").split(",") if p.strip()]
     vals = [float(p) for p in parts]
     if len(vals) != 4:
@@ -100,9 +100,9 @@ def get_trainer_from_args(dataset_name_or_id: Union[int, str],
                           sampling_category_weights: Optional[Dict[int, float]] = None,
                           sampling_category_weight_mode: Optional[str] = None,
                           region_loss_weights: Optional[list] = None,
-                          vessel_class_weights: Optional[Dict[int, float]] = None,
+                          normal_class_weights: Optional[Dict[int, float]] = None,
                           enable_sampling_weights: bool = False,
-                          enable_vessel_upsample: bool = False,
+                          enable_normal_upsample: bool = False,
                           enable_deep_supervision_logging: bool = False,
                           enable_ema: bool = False,
                           ema_decay: float = 0.999,
@@ -130,20 +130,20 @@ def get_trainer_from_args(dataset_name_or_id: Union[int, str],
             nnunet_trainer.SAMPLING_CATEGORY_WEIGHT_MODE = sampling_category_weight_mode
         else:
             print("WARNING: Trainer does not define SAMPLING_CATEGORY_WEIGHT_MODE; ignoring --sampling_category_weight_mode.")
-    if vessel_class_weights is not None:
-        nnunet_trainer.VESSEL_CLASS_WEIGHTS = vessel_class_weights
-        print(f'CLI override VESSEL_CLASS_WEIGHTS: {vessel_class_weights}')
+    if normal_class_weights is not None:
+        nnunet_trainer.NORMAL_CLASS_WEIGHTS = normal_class_weights
+        print(f'CLI override NORMAL_CLASS_WEIGHTS: {normal_class_weights}')
 
-    # 顯式開關：是否啟用 sampling_category_weights / vessel_upsample
+    # 顯式開關：是否啟用 sampling_category_weights / normal_upsample
     nnunet_trainer.ENABLE_SAMPLING_WEIGHTS = enable_sampling_weights
-    nnunet_trainer.ENABLE_VESSEL_UPSAMPLE = enable_vessel_upsample
+    nnunet_trainer.ENABLE_NORMAL_UPSAMPLE = enable_normal_upsample
     nnunet_trainer.ENABLE_DEEP_SUPERVISION_LOGGING = enable_deep_supervision_logging
     nnunet_trainer.ENABLE_EMA = enable_ema
     nnunet_trainer.EMA_DECAY = ema_decay
     if enable_sampling_weights:
         print('CLI: ENABLE_SAMPLING_WEIGHTS = True (啟用依類別加權取樣)')
-    if enable_vessel_upsample:
-        print('CLI: ENABLE_VESSEL_UPSAMPLE = True (啟用 vessel upsample 模式)')
+    if enable_normal_upsample:
+        print('CLI: ENABLE_NORMAL_UPSAMPLE = True (啟用 normal upsample 模式)')
     if enable_deep_supervision_logging:
         print('CLI: ENABLE_DEEP_SUPERVISION_LOGGING = True (啟用每層 deep supervision logging)')
     if enable_ema:
@@ -229,8 +229,8 @@ def run_ddp(rank, dataset_name_or_id, configuration, fold, tr, p, use_compressed
             initial_lr, oversample_foreground_percent, oversample_foreground_percent_val, num_iterations_per_epoch, num_epochs, optimizer_type, lr_scheduler_type,
             enable_early_stopping, early_stopping_patience, early_stopping_min_delta,
             sampling_category_weights, sampling_category_weight_mode,
-            region_loss_weights, vessel_class_weights,
-            enable_sampling_weights, enable_vessel_upsample,
+            region_loss_weights, normal_class_weights,
+            enable_sampling_weights, enable_normal_upsample,
             enable_deep_supervision_logging,
             enable_ema, ema_decay,
             cls_foreground_labels, best_val_classes):
@@ -251,9 +251,9 @@ def run_ddp(rank, dataset_name_or_id, configuration, fold, tr, p, use_compressed
                                            sampling_category_weights=sampling_category_weights,
                                            sampling_category_weight_mode=sampling_category_weight_mode,
                                            region_loss_weights=region_loss_weights,
-                                           vessel_class_weights=vessel_class_weights,
+                                           normal_class_weights=normal_class_weights,
                                            enable_sampling_weights=enable_sampling_weights,
-                                           enable_vessel_upsample=enable_vessel_upsample,
+                                           enable_normal_upsample=enable_normal_upsample,
                                            enable_deep_supervision_logging=enable_deep_supervision_logging,
                                            enable_ema=enable_ema,
                                            ema_decay=ema_decay,
@@ -303,9 +303,9 @@ def run_training(dataset_name_or_id: Union[str, int],
                  sampling_category_weights: Optional[Dict[int, float]] = None,
                  sampling_category_weight_mode: Optional[str] = None,
                  region_loss_weights: Optional[list] = None,
-                 vessel_class_weights: Optional[Dict[int, float]] = None,
+                 normal_class_weights: Optional[Dict[int, float]] = None,
                  enable_sampling_weights: bool = False,
-                 enable_vessel_upsample: bool = False,
+                 enable_normal_upsample: bool = False,
                  enable_deep_supervision_logging: bool = False,
                  enable_ema: bool = False,
                  ema_decay: float = 0.999,
@@ -355,9 +355,9 @@ def run_training(dataset_name_or_id: Union[str, int],
                      sampling_category_weights,
                      sampling_category_weight_mode,
                      region_loss_weights,
-                     vessel_class_weights,
+                     normal_class_weights,
                      enable_sampling_weights,
-                     enable_vessel_upsample,
+                     enable_normal_upsample,
                      enable_deep_supervision_logging,
                      enable_ema,
                      ema_decay,
@@ -381,9 +381,9 @@ def run_training(dataset_name_or_id: Union[str, int],
                                                sampling_category_weights=sampling_category_weights,
                                                sampling_category_weight_mode=sampling_category_weight_mode,
                                                region_loss_weights=region_loss_weights,
-                                               vessel_class_weights=vessel_class_weights,
+                                               normal_class_weights=normal_class_weights,
                                                enable_sampling_weights=enable_sampling_weights,
-                                               enable_vessel_upsample=enable_vessel_upsample,
+                                               enable_normal_upsample=enable_normal_upsample,
                                                enable_deep_supervision_logging=enable_deep_supervision_logging,
                                                enable_ema=enable_ema,
                                                ema_decay=ema_decay,
@@ -494,23 +494,23 @@ def run_training_entry():
                              'Comma-separated floats, e.g. "5,1,1,1,1" to weight aneurysm channel 5x. '
                              'Overrides region_loss_weights in dataset.json if provided.')
 
-    # Vessel upsample mode: per-class weighted sampling for normal patches
-    parser.add_argument('--vessel_class_weights', type=str, default=None, required=False,
-                        help='[OPTIONAL] Enable vessel upsample mode with per-class weights. '
+    # Normal upsample mode: per-class weighted sampling for normal patches
+    parser.add_argument('--normal_class_weights', type=str, default=None, required=False,
+                        help='[OPTIONAL] Enable normal upsample mode with per-class weights. '
                              'Comma-separated "label=weight" pairs, e.g. "1=1,2=1,3=1,4=1" for equal sampling. '
-                             'When set, normal patches sample from vessel mask with specified class proportions. '
-                             'When not set, all vessel voxels are pooled together (traditional behavior).')
+                             'When set, normal patches sample from normal mask with specified class proportions. '
+                             'When not set, all normal voxels are pooled together (traditional behavior).')
 
     # 顯式開關：是否啟用 sampling_category_weights 加權取樣模式
     parser.add_argument('--enable_sampling_weights', action='store_true', required=False,
                         help='[OPTIONAL] Explicitly enable sampling category weights mode. '
                              'When set, SAMPLING_CATEGORY_WEIGHTS will be applied to case-level sampling. '
                              'Without this flag, sampling_categories data is loaded but weights are NOT applied.')
-    # 顯式開關：是否啟用 vessel upsample 模式
-    parser.add_argument('--enable_vessel_upsample', action='store_true', required=False,
-                        help='[OPTIONAL] Explicitly enable vessel upsample mode. '
-                             'When set, vessel_class_weights (from --vessel_class_weights or default) will be used '
-                             'for per-class weighted sampling. Without this flag, all vessel voxels are pooled together.')
+    # 顯式開關：是否啟用 normal upsample 模式
+    parser.add_argument('--enable_normal_upsample', action='store_true', required=False,
+                        help='[OPTIONAL] Explicitly enable normal upsample mode. '
+                             'When set, normal_class_weights (from --normal_class_weights or default) will be used '
+                             'for per-class weighted sampling. Without this flag, all normal voxels are pooled together.')
     # 顯式開關：是否記錄每層 deep supervision 的 dice/ce/individual loss
     parser.add_argument('--enable_deep_supervision_logging', action='store_true', required=False,
                         help='[OPTIONAL] Enable per-level deep supervision logging (ce_loss, dice_loss, '
@@ -560,13 +560,13 @@ def run_training_entry():
     if args.region_loss_weights is not None:
         region_loss_weights = [float(x.strip()) for x in args.region_loss_weights.split(',')]
 
-    # 解析 vessel_class_weights: "1=1,2=1,3=1,4=1" -> {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
-    vessel_class_weights = None
-    if args.vessel_class_weights is not None:
-        vessel_class_weights = {}
-        for pair in args.vessel_class_weights.split(','):
+    # 解析 normal_class_weights: "1=1,2=1,3=1,4=1" -> {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
+    normal_class_weights = None
+    if args.normal_class_weights is not None:
+        normal_class_weights = {}
+        for pair in args.normal_class_weights.split(','):
             k, v = pair.strip().split('=')
-            vessel_class_weights[int(k)] = float(v)
+            normal_class_weights[int(k)] = float(v)
 
     # 解析 cls_foreground_labels: "1" -> [1], "1,2" -> [1, 2]
     cls_foreground_labels = None
@@ -594,9 +594,9 @@ def run_training_entry():
                  sampling_category_weights=sampling_category_weights,
                  sampling_category_weight_mode=args.sampling_category_weight_mode,
                  region_loss_weights=region_loss_weights,
-                 vessel_class_weights=vessel_class_weights,
+                 normal_class_weights=normal_class_weights,
                  enable_sampling_weights=args.enable_sampling_weights,
-                 enable_vessel_upsample=args.enable_vessel_upsample,
+                 enable_normal_upsample=args.enable_normal_upsample,
                  enable_deep_supervision_logging=args.enable_deep_supervision_logging,
                  enable_ema=args.enable_ema,
                  ema_decay=args.ema_decay,

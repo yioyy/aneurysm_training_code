@@ -71,18 +71,18 @@ class nnUNetTrainer(object):
     # - "target_proportion": 權重解讀為目標類別抽樣比例（會自動除以該 fold 類別 case 數量）
     SAMPLING_CATEGORY_WEIGHT_MODE = "target_proportion"
 
-    # vessel upsample 模式：normal patch 按血管類別加權取樣
-    # None → 非 upsample 模式，所有血管座標合併後隨機取樣（傳統行為）
+    # normal upsample 模式：normal patch 按類別加權取樣
+    # None → 非 upsample 模式，所有座標合併後隨機取樣（傳統行為）
     # dict → upsample 模式，e.g. {1:1, 2:1, 3:1, 4:1} 表示 4 類各 25% 機率
-    VESSEL_CLASS_WEIGHTS = None
+    NORMAL_CLASS_WEIGHTS = None
 
-    # 顯式開關（由 CLI --enable_sampling_weights / --enable_vessel_upsample 控制）
+    # 顯式開關（由 CLI --enable_sampling_weights / --enable_normal_upsample 控制）
     # False → 即使 sampling_categories 存在也不套用加權取樣
     # True  → 套用 SAMPLING_CATEGORY_WEIGHTS 加權取樣
     ENABLE_SAMPLING_WEIGHTS = False
-    # False → 所有血管座標合併隨機取樣（傳統行為）
-    # True  → 按 VESSEL_CLASS_WEIGHTS 比例取樣
-    ENABLE_VESSEL_UPSAMPLE = False
+    # False → 所有座標合併隨機取樣（傳統行為）
+    # True  → 按 NORMAL_CLASS_WEIGHTS 比例取樣
+    ENABLE_NORMAL_UPSAMPLE = False
 
     # 是否記錄每層 deep supervision 的 dice（ce_l, dice_l, individual_dice_losses, dc1/dc2/...）
     # False → 只計算 loss + dc0（最高解析度），省掉 ~2x loss 計算 + N 層 dice 計算
@@ -1037,17 +1037,17 @@ class nnUNetTrainer(object):
                 also_print_to_console=True
             )
 
-        enable_vessel_upsample = getattr(self, "ENABLE_VESSEL_UPSAMPLE", False)
-        if enable_vessel_upsample:
-            vessel_class_weights = getattr(self.__class__, "VESSEL_CLASS_WEIGHTS", None)
+        enable_normal_upsample = getattr(self, "ENABLE_NORMAL_UPSAMPLE", False)
+        if enable_normal_upsample:
+            normal_class_weights = getattr(self.__class__, "NORMAL_CLASS_WEIGHTS", None)
             self.print_to_log_file(
-                f"ENABLE_VESSEL_UPSAMPLE=True → 啟用 vessel upsample 模式, weights: {vessel_class_weights}",
+                f"ENABLE_NORMAL_UPSAMPLE=True → 啟用 normal upsample 模式, weights: {normal_class_weights}",
                 also_print_to_console=True
             )
         else:
-            vessel_class_weights = None
+            normal_class_weights = None
             self.print_to_log_file(
-                "ENABLE_VESSEL_UPSAMPLE=False → 不啟用 vessel upsample（所有血管座標合併隨機取樣）",
+                "ENABLE_NORMAL_UPSAMPLE=False → 不啟用 normal upsample（所有座標合併隨機取樣）",
                 also_print_to_console=True
             )
 
@@ -1071,7 +1071,7 @@ class nnUNetTrainer(object):
                                        oversample_foreground_percent=self.oversample_foreground_percent,
                                        sampling_probabilities=sampling_probabilities, pad_sides=None,
                                        sampling_categories=sampling_categories,
-                                       vessel_class_weights=vessel_class_weights,
+                                       normal_class_weights=normal_class_weights,
                                        compute_positives=compute_positives,
                                        cls_foreground_labels=cls_foreground_labels)
             dl_val = nnUNetDataLoader2D(dataset_val, self.batch_size,
@@ -1081,7 +1081,7 @@ class nnUNetTrainer(object):
                                         oversample_foreground_percent=self.oversample_foreground_percent_val,
                                         sampling_probabilities=None, pad_sides=None,
                                         sampling_categories=sampling_categories,
-                                        vessel_class_weights=vessel_class_weights,
+                                        normal_class_weights=normal_class_weights,
                                         compute_positives=compute_positives,
                                         cls_foreground_labels=cls_foreground_labels)
         else:
@@ -1092,7 +1092,7 @@ class nnUNetTrainer(object):
                                        oversample_foreground_percent=self.oversample_foreground_percent,
                                        sampling_probabilities=sampling_probabilities, pad_sides=None,
                                        sampling_categories=sampling_categories,
-                                       vessel_class_weights=vessel_class_weights,
+                                       normal_class_weights=normal_class_weights,
                                        compute_positives=compute_positives,
                                        cls_foreground_labels=cls_foreground_labels)
             dl_val = nnUNetDataLoader3D(dataset_val, self.batch_size,
@@ -1102,7 +1102,7 @@ class nnUNetTrainer(object):
                                         oversample_foreground_percent=self.oversample_foreground_percent_val,
                                         sampling_probabilities=None, pad_sides=None,
                                         sampling_categories=sampling_categories,
-                                        vessel_class_weights=vessel_class_weights,
+                                        normal_class_weights=normal_class_weights,
                                         compute_positives=compute_positives)
         return dl_tr, dl_val
 

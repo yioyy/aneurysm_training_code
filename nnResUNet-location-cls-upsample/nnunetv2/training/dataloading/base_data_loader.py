@@ -19,17 +19,17 @@ class nnUNetDataLoaderBase(DataLoader):
                  pad_sides: Union[List[int], Tuple[int, ...], np.ndarray] = None,
                  probabilistic_oversampling: bool = False,
                  sampling_categories: dict = None,
-                 vessel_class_weights: dict = None,
+                 normal_class_weights: dict = None,
                  compute_positives: bool = False,
                  cls_foreground_labels: list = None):
         super().__init__(data, batch_size, 1, None, True, False, True, sampling_probabilities)
         assert isinstance(data, nnUNetDataset), 'nnUNetDataLoaderBase only supports dictionaries as data'
         self.indices = list(data.keys())
         self.sampling_categories = sampling_categories
-        # vessel_class_weights: {label: weight} for upsample mode
+        # normal_class_weights: {label: weight} for upsample mode
         # e.g. {1: 1, 2: 1, 3: 1, 4: 1} → 等比例取樣
         # None → 非 upsample 模式，所有座標合併後隨機取樣
-        self.vessel_class_weights = vessel_class_weights
+        self.normal_class_weights = normal_class_weights
         # 是否計算 classification label（positives）；僅 classifier 架構需要
         self.compute_positives = compute_positives
         # cls_foreground_labels: 分類頭判斷 positive 時只看哪些 label
@@ -37,9 +37,9 @@ class nnUNetDataLoaderBase(DataLoader):
         # [1] → 只有 label==1 算前景（例如只看動脈瘤）
         # [1, 2] → label==1 或 label==2 算前景
         self.cls_foreground_labels = cls_foreground_labels
-        # cache for _sample_vessel_voxel concatenation（避免每次重新 concatenate）
-        self._vessel_concat_cache_id = None
-        self._vessel_concat_cache_arr = None
+        # cache for _sample_normal_voxel concatenation（避免每次重新 concatenate）
+        self._normal_concat_cache_id = None
+        self._normal_concat_cache_arr = None
 
         self.oversample_foreground_percent = oversample_foreground_percent
         self.final_patch_size = final_patch_size
@@ -80,7 +80,7 @@ class nnUNetDataLoaderBase(DataLoader):
         seg_shape = (self.batch_size, seg.shape[0], *self.patch_size)
         return data_shape, seg_shape
 
-    def get_bbox(self, data_shape: np.ndarray, force_fg: bool, class_locations: Union[dict, None], vessel_locations: Union[dict, None],
+    def get_bbox(self, data_shape: np.ndarray, force_fg: bool, class_locations: Union[dict, None], normal_locations: Union[dict, None],
                  overwrite_class: Union[int, Tuple[int, ...]] = None, verbose: bool = False):
         # in dataloader 2d we need to select the slice prior to this and also modify the class_locations to only have
         # locations for the given slice
@@ -102,12 +102,12 @@ class nnUNetDataLoaderBase(DataLoader):
         # if not force_fg then we can just sample the bbox randomly from lb and ub. Else we need to make sure we get
         # at least one of the foreground classes in the patch
         if not force_fg and not self.has_ignore:
-            #根據血管mask去篩選，至少包含一個血管
-            selected_voxel = self._sample_vessel_voxel(vessel_locations)
+            #根據 normal mask 去篩選，至少包含一個取樣區域
+            selected_voxel = self._sample_normal_voxel(normal_locations)
             if selected_voxel is not None:
                 bbox_lbs = [max(lbs[i], selected_voxel[i + 1] - self.patch_size[i] // 2) for i in range(dim)]
             else:
-                # 沒有 vessel_locations，回退到隨機採樣
+                # 沒有 normal_locations，回退到隨機採樣
                 bbox_lbs = [np.random.randint(lbs[i], ubs[i] + 1) for i in range(dim)]
             # print('I do not want a random location')
         else:
@@ -158,24 +158,24 @@ class nnUNetDataLoaderBase(DataLoader):
                 # i + 1 because we have first dimension 0!
                 bbox_lbs = [max(lbs[i], selected_voxel[i + 1] - self.patch_size[i] // 2) for i in range(dim)]
             else:
-                # If the image does not contain any foreground classes, we fall back to vessel or random
-                #沒有任何前景，我會取血管
-                selected_voxel = self._sample_vessel_voxel(vessel_locations)
+                # If the image does not contain any foreground classes, we fall back to normal or random
+                #沒有任何前景，改用 normal mask 取樣
+                selected_voxel = self._sample_normal_voxel(normal_locations)
                 if selected_voxel is not None:
                     bbox_lbs = [max(lbs[i], selected_voxel[i + 1] - self.patch_size[i] // 2) for i in range(dim)]
                 else:
-                    # 沒有 vessel_locations，回退到隨機採樣
+                    # 沒有 normal_locations，回退到隨機採樣
                     bbox_lbs = [np.random.randint(lbs[i], ubs[i] + 1) for i in range(dim)]
 
-        # 防止 bbox_lbs 超出上限（vessel/foreground 取樣可能選到邊緣 voxel）
+        # 防止 bbox_lbs 超出上限（normal/foreground 取樣可能選到邊緣 voxel）
         bbox_lbs = [min(bbox_lbs[i], ubs[i]) for i in range(dim)]
         bbox_ubs = [bbox_lbs[i] + self.patch_size[i] for i in range(dim)]
 
         return bbox_lbs, bbox_ubs
 
-    def _sample_vessel_voxel(self, vessel_locations):
+    def _sample_normal_voxel(self, normal_locations):
         """
-        從 vessel_locations 中取樣一個 voxel。
+        從 normal_locations 中取樣一個 voxel。
 
         支援兩種格式（自動偵測）：
         - 舊格式：numpy.ndarray, shape (N, 4)，直接隨機取樣
@@ -183,38 +183,38 @@ class nnUNetDataLoaderBase(DataLoader):
 
         回傳 None 則由呼叫端改用隨機採樣。
         """
-        if vessel_locations is None:
+        if normal_locations is None:
             return None
 
         # 舊格式：直接是 numpy array (N, 4)
-        if isinstance(vessel_locations, np.ndarray):
-            if len(vessel_locations) == 0:
+        if isinstance(normal_locations, np.ndarray):
+            if len(normal_locations) == 0:
                 return None
-            return vessel_locations[np.random.choice(len(vessel_locations))]
+            return normal_locations[np.random.choice(len(normal_locations))]
 
         # 新格式：dict {label: ndarray}
-        if len(vessel_locations) == 0:
+        if len(normal_locations) == 0:
             return None
 
-        if self.vessel_class_weights is None:
+        if self.normal_class_weights is None:
             # 非 upsample 模式：所有座標合併（使用 cache 避免每次重新 concatenate）
-            vid = id(vessel_locations)
-            if self._vessel_concat_cache_id != vid:
-                all_locs = np.concatenate([locs for locs in vessel_locations.values() if len(locs) > 0], axis=0)
-                self._vessel_concat_cache_id = vid
-                self._vessel_concat_cache_arr = all_locs
-            all_locs = self._vessel_concat_cache_arr
+            vid = id(normal_locations)
+            if self._normal_concat_cache_id != vid:
+                all_locs = np.concatenate([locs for locs in normal_locations.values() if len(locs) > 0], axis=0)
+                self._normal_concat_cache_id = vid
+                self._normal_concat_cache_arr = all_locs
+            all_locs = self._normal_concat_cache_arr
             if len(all_locs) == 0:
                 return None
             return all_locs[np.random.choice(len(all_locs))]
         else:
-            # upsample 模式：按 vessel_class_weights 比例選類別
-            available_labels = [lb for lb in vessel_locations.keys() if len(vessel_locations[lb]) > 0]
+            # upsample 模式：按 normal_class_weights 比例選類別
+            available_labels = [lb for lb in normal_locations.keys() if len(normal_locations[lb]) > 0]
             if len(available_labels) == 0:
                 return None
 
-            weights = np.array([self.vessel_class_weights.get(lb, 1.0) for lb in available_labels])
+            weights = np.array([self.normal_class_weights.get(lb, 1.0) for lb in available_labels])
             weights = weights / weights.sum()
             selected_label = available_labels[np.random.choice(len(available_labels), p=weights)]
-            locs = vessel_locations[selected_label]
+            locs = normal_locations[selected_label]
             return locs[np.random.choice(len(locs))]

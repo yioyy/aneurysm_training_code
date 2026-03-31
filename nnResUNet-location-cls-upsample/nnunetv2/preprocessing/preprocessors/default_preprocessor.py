@@ -38,7 +38,7 @@ class DefaultPreprocessor(object):
     def run_case(self, image_files: List[str], seg_file: Union[str, None], plans_manager: PlansManager,
                  configuration_manager: ConfigurationManager,
                  dataset_json: Union[dict, str],
-                 vessel_file: Union[str, None] = None,
+                 normal_file: Union[str, None] = None,
                  dilate_file: Union[str, None] = None):
         """
         seg file can be none (test cases)
@@ -46,7 +46,7 @@ class DefaultPreprocessor(object):
         order of operations is: transpose -> crop -> resample
         so when we export we need to run the following order: resample -> crop -> transpose (we could also run
         transpose at a different place, but reverting the order of operations done during preprocessing seems cleaner)
-        vessel用跟seg一樣的處理，只差最後儲存出所有座標放到properites裡
+        normal 用跟 seg 一樣的處理，只差最後儲存出所有座標放到 properites 裡
 
         """
         if isinstance(dataset_json, str):
@@ -63,13 +63,13 @@ class DefaultPreprocessor(object):
         else:
             seg = None
 
-        # if possible, load vessel
-        if vessel_file is not None:
-            vessel, _ = rw.read_seg(vessel_file)
+        # if possible, load normal (sampling mask)
+        if normal_file is not None:
+            normal, _ = rw.read_seg(normal_file)
         else:
-            vessel = None
+            normal = None
 
-        # if possible, load vessel
+        # if possible, load dilate
         if dilate_file is not None:
             dilate, _ = rw.read_seg(dilate_file)
         else:
@@ -79,8 +79,8 @@ class DefaultPreprocessor(object):
         data = data.transpose([0, *[i + 1 for i in plans_manager.transpose_forward]])
         if seg is not None:
             seg = seg.transpose([0, *[i + 1 for i in plans_manager.transpose_forward]])
-        if vessel is not None:
-            vessel = vessel.transpose([0, *[i + 1 for i in plans_manager.transpose_forward]])
+        if normal is not None:
+            normal = normal.transpose([0, *[i + 1 for i in plans_manager.transpose_forward]])
         if dilate is not None:
             dilate = dilate.transpose([0, *[i + 1 for i in plans_manager.transpose_forward]])
 
@@ -91,7 +91,7 @@ class DefaultPreprocessor(object):
         data_properites['shape_before_cropping'] = shape_before_cropping
         # this command will generate a segmentation. This is important because of the nonzero mask which we may need
         data, seg, bbox = crop_to_nonzero(data, seg) #是基於data切，所以不會錯
-        data1, vessel, bbox1 = crop_to_nonzero(data, vessel)
+        data1, normal, bbox1 = crop_to_nonzero(data, normal)
         data2, dilate, bbox2 = crop_to_nonzero(data, dilate)
 
         data_properites['bbox_used_for_cropping'] = bbox
@@ -118,7 +118,7 @@ class DefaultPreprocessor(object):
         old_shape = data.shape[1:]
         data = configuration_manager.resampling_fn_data(data, new_shape, original_spacing, target_spacing)
         seg = configuration_manager.resampling_fn_seg(seg, new_shape, original_spacing, target_spacing)
-        vessel = configuration_manager.resampling_fn_seg(vessel, new_shape, original_spacing, target_spacing)
+        normal = configuration_manager.resampling_fn_seg(normal, new_shape, original_spacing, target_spacing)
         dilate = configuration_manager.resampling_fn_seg(dilate, new_shape, original_spacing, target_spacing)
        
         if self.verbose:
@@ -145,12 +145,12 @@ class DefaultPreprocessor(object):
                                                                                    verbose=self.verbose)
             seg = self.modify_seg_fn(seg, plans_manager, dataset_json, configuration_manager)
 
-        #最後，用一個欄位紀錄出vessel位置
-        if vessel_file is not None:
+        #最後，用一個欄位紀錄出 normal 取樣座標
+        if normal_file is not None:
             # no need to filter background in regions because it is already filtered in handle_labels
             # print(all_labels, regions)
             seed = random.randint(0, 2**32 - 1)  # 生成一個隨機的 seed
-            data_properites['vessel_locations'] = self._sample_locations(vessel, seed = seed, verbose=self.verbose)
+            data_properites['normal_locations'] = self._sample_locations(normal, seed = seed, verbose=self.verbose)
 
         #最後，用一個欄位紀錄出動脈瘤dilate位置
         if dilate_file is not None:
@@ -176,11 +176,11 @@ class DefaultPreprocessor(object):
         return data, seg, data_properites
 
     def run_case_save(self, output_filename_truncated: str, image_files: List[str], seg_file: str,
-                      vessel_file: str, dilate_file: str, plans_manager: PlansManager, 
+                      normal_file: str, dilate_file: str, plans_manager: PlansManager,
                       configuration_manager: ConfigurationManager,
                       dataset_json: Union[dict, str]):
-        data, seg, properties = self.run_case(image_files, seg_file, plans_manager, configuration_manager, 
-                                               dataset_json, vessel_file=vessel_file, dilate_file=dilate_file)
+        data, seg, properties = self.run_case(image_files, seg_file, plans_manager, configuration_manager,
+                                               dataset_json, normal_file=normal_file, dilate_file=dilate_file)
         # print('dtypes', data.dtype, seg.dtype)
         np.savez_compressed(output_filename_truncated + '.npz',  data=data.astype('float16'), seg=seg) #以float16保存
         write_pickle(properties, output_filename_truncated + '.pkl')
@@ -218,7 +218,7 @@ class DefaultPreprocessor(object):
     @staticmethod
     def _sample_locations(seg: np.ndarray, seed: int = 1234, verbose: bool = False):
         """
-        vessel 取樣座標，按類別分別儲存。
+        Normal 取樣座標，按類別分別儲存。
 
         回傳 dict: {label_int: np.ndarray of shape (N, ndim)}
         格式與 class_locations 一致，方便後續 data loader 按類別取樣。
@@ -238,18 +238,18 @@ class DefaultPreprocessor(object):
         labels = np.array([int(i) for i in labels.tolist()], dtype=np.int64)
         labels = labels[labels > 0]
 
-        vessel_locs = {}
+        normal_locs = {}
         for lb in labels:
             locs = np.argwhere(seg_arr == int(lb))
             if len(locs) > 0:
                 locs = locs[rndst.permutation(len(locs))]
-            vessel_locs[int(lb)] = locs
+            normal_locs[int(lb)] = locs
 
         if verbose:
-            msg = ", ".join([f"{lb}:{len(vessel_locs[lb])}" for lb in sorted(vessel_locs.keys())])
-            print(f"[vessel sampling] per-class counts: {msg}")
+            msg = ", ".join([f"{lb}:{len(normal_locs[lb])}" for lb in sorted(normal_locs.keys())])
+            print(f"[normal sampling] per-class counts: {msg}")
 
-        return vessel_locs
+        return normal_locs
 
     def _normalize(self, data: np.ndarray, seg: np.ndarray, configuration_manager: ConfigurationManager,
                    foreground_intensity_properties_per_channel: dict) -> np.ndarray:
@@ -306,15 +306,12 @@ class DefaultPreprocessor(object):
                                                                  identifiers)
         # list of segmentation filenames
         seg_fnames = [join(nnUNet_raw, dataset_name, 'labelsTr', i + file_ending) for i in identifiers]
-        vessel_dir = join(nnUNet_raw, dataset_name, 'vesselsTr')
+        normal_dir = join(nnUNet_raw, dataset_name, 'normalsTr')
         dilation_dir = join(nnUNet_raw, dataset_name, 'dilationsTr')
-        vessel_fnames = [join(vessel_dir, i + file_ending) if isdir(vessel_dir) else None for i in identifiers]
+        normal_fnames = [join(normal_dir, i + file_ending) if isdir(normal_dir) else None for i in identifiers]
         dilation_fnames = [join(dilation_dir, i + file_ending) if isdir(dilation_dir) else None for i in identifiers]
 
-        #print('go go go dilation !!!')
-        #print('vessel_fnames:', vessel_fnames)
-
-        _ = ptqdm(self.run_case_save, (output_filenames_truncated, image_fnames, seg_fnames, vessel_fnames, dilation_fnames),
+        _ = ptqdm(self.run_case_save, (output_filenames_truncated, image_fnames, seg_fnames, normal_fnames, dilation_fnames),
                   processes=num_processes, zipped=True, plans_manager=plans_manager,
                   configuration_manager=configuration_manager,
                   dataset_json=dataset_json, disable=self.verbose)

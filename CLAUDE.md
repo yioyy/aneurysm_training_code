@@ -88,4 +88,4 @@ Plans JSON (`UNet_class_name`) â†’ `get_network_from_plans.py` (mapping dict) â†
 
 ## Data Format
 - NIfTI (.nii.gz) images following nnU-Net naming: `{CASE_ID}_0000.nii.gz` (image), `{CASE_ID}.nii.gz` (label)
-- Dataset127 has additional `vesselsTr/` (vessel masks constraining sampling region) and `dilationsTr/` (dilated labels for sampling region expansion)
+- Dataset127 has additional `normalsTr/` (normal sampling masks constraining sampling region) and `dilationsTr/` (dilated labels for sampling region expansion)

@@ -26,7 +26,7 @@ class nnUNetDataLoader3D(nnUNetDataLoaderBase):
             dim = len(shape)
             bbox_lbs, bbox_ubs = self.get_bbox(shape, force_fg,
                                                properties.get('dilate_locations', properties.get('class_locations')),
-                                               properties.get('vessel_locations', None))
+                                               properties.get('normal_locations', None))
 
             # whoever wrote this knew what he was doing (hint: it was me). We first crop the data to the region of the
             # bbox that actually lies within the data. This will result in a smaller array which is then faster to pad.

@@ -63,7 +63,7 @@ class nnUNetDataLoader2D(nnUNetDataLoaderBase):
             dim = len(shape)
             bbox_lbs, bbox_ubs = self.get_bbox(shape, force_fg if selected_class_or_region is not None else None,
                                                properties.get('dilate_locations', properties.get('class_locations')),
-                                               properties.get('vessel_locations', None),
+                                               properties.get('normal_locations', None),
                                                overwrite_class=selected_class_or_region)
 
             # whoever wrote this knew what he was doing (hint: it was me). We first crop the data to the region of the
