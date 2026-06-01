@@ -95,6 +95,11 @@ class nnUNetTrainer(object):
     ENABLE_EMA = False
     EMA_DECAY = 0.999
 
+    # 當由 MUTP 呼叫時，關閉 Trainer 內建的 MLflow（由 MUTP 的 watcher thread 獨立追蹤）
+    # False → Trainer 自行管理 MLflow run（獨立使用時）
+    # True  → 跳過所有 mlflow.start_run / log_metric / log_artifact / autolog
+    DISABLE_BUILTIN_MLFLOW = False
+
     # 分類頭判斷 positive 時只看哪些 seg label
     # None → 所有 > 0 的 label 都算前景（原始行為，適用 2 分類）
     # [1] → 只有 label==1 算前景（multi-label 時只看動脈瘤）
@@ -106,6 +111,15 @@ class nnUNetTrainer(object):
     # [4] → 只看第 5 個 class（0-indexed，例如 Aneurysm）
     # [0, 4] → 只看第 1 和第 5 個 class 的平均
     BEST_VAL_CLASSES = None
+
+    # 資料增強設定（由 MUTP recipe 控制，None=使用 nnU-Net 預設值）
+    AUGMENTATION_CONFIG = None
+
+    # 梯度累積（batch_size 大時降低 data loader 壓力）
+    # False ��� 每步都 optimizer.step()（預設行為）
+    # True → 累積 GRADIENT_ACCUMULATION_STEPS 步才 optimizer.step()
+    ENABLE_GRADIENT_ACCUMULATION = False
+    GRADIENT_ACCUMULATION_STEPS = 1
 
     def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict, unpack_dataset: bool = True,
                  device: torch.device = torch.device('cuda'),
@@ -462,7 +476,15 @@ class nnUNetTrainer(object):
             # 從 dataset.json 讀取可選的 per-channel loss 權重
             channel_weights = self.dataset_json.get('region_loss_weights', None)
             if channel_weights is not None:
-                print(f'Region loss channel_weights: {channel_weights}')
+                self.print_to_log_file(
+                    f"enable_region_loss_weights=True → per-channel loss 權重: {channel_weights}",
+                    also_print_to_console=True
+                )
+            else:
+                self.print_to_log_file(
+                    "enable_region_loss_weights=False → 所有 channel 等權重",
+                    also_print_to_console=True
+                )
 
             loss = DC_and_BCE_loss({},
                                    {'batch_dice': self.configuration_manager.batch_dice,
@@ -756,7 +778,8 @@ class nnUNetTrainer(object):
                                         verbose=1
                                         ))) #depth=float('inf') => 預設全展開
 
-                mlflow.log_artifact(txt_path)
+                if not self.DISABLE_BUILTIN_MLFLOW:
+                    mlflow.log_artifact(txt_path)
 
                 #下面這個有可能失敗，所以放到後面做....
                 import hiddenlayer as hl
@@ -898,13 +921,57 @@ class nnUNetTrainer(object):
         rotation_for_DA, do_dummy_2d_data_aug, initial_patch_size, mirror_axes = \
             self.configure_rotation_dummyDA_mirroring_and_inital_patch_size()
 
-        # training pipeline
+        # training pipeline — augmentation config log
+        aug_config = getattr(self, 'AUGMENTATION_CONFIG', None) or {}
+        if aug_config:
+            aug_lines = ["", "=" * 60, "Data Augmentation Config（from MUTP recipe）", "=" * 60]
+            # 開關
+            switches = {
+                "rotation": ("隨機旋轉", True),
+                "scaling": ("隨機縮放", True),
+                "elastic_deformation": ("彈性形變", False),
+                "gaussian_noise": ("高斯雜訊", True),
+                "gaussian_blur": ("高斯模糊", True),
+                "brightness_multiply": ("亮度乘法", True),
+                "contrast": ("對比度增強", True),
+                "gamma_transform": ("Gamma 轉換", True),
+                "simulate_low_resolution": ("低解析度模擬", False),
+                "mirror": ("鏡像翻轉", True),
+            }
+            for key, (desc, default) in switches.items():
+                val = aug_config.get(key, default)
+                status = "ON" if val else "OFF"
+                changed = "" if val == default else " ← 已修改"
+                aug_lines.append(f"  {desc:<16} ({key}): {status}{changed}")
+            # 數值參數
+            params = {
+                "rotation_p": ("旋轉機率", 0.2),
+                "scaling_range": ("縮放範圍", [0.7, 1.4]),
+                "scaling_p": ("縮放機率", 0.2),
+                "gaussian_noise_p": ("雜訊機率", 0.1),
+                "gaussian_blur_p": ("模糊機率", 0.2),
+                "brightness_p": ("亮度機率", 0.15),
+                "contrast_p": ("對比度機率", 0.15),
+                "simulate_low_resolution_p": ("低解析度機率", 0.25),
+                "simulate_low_resolution_zoom": ("低解析度縮放", [0.5, 1.0]),
+            }
+            for key, (desc, default) in params.items():
+                val = aug_config.get(key, default)
+                changed = "" if val == default else " ← 已修改"
+                aug_lines.append(f"  {desc:<16} ({key}): {val}{changed}")
+            aug_lines.append("=" * 60)
+            self.print_to_log_file("\n".join(aug_lines), also_print_to_console=True)
+        else:
+            self.print_to_log_file("Data Augmentation: 使用 nnU-Net 預設值（無 MUTP recipe 覆蓋）",
+                                   also_print_to_console=True)
+
         tr_transforms = self.get_training_transforms(
             patch_size, rotation_for_DA, deep_supervision_scales, mirror_axes, do_dummy_2d_data_aug,
             order_resampling_data=3, order_resampling_seg=1,
             use_mask_for_norm=self.configuration_manager.use_mask_for_norm,
             is_cascaded=self.is_cascaded, foreground_labels=self.label_manager.foreground_labels,
             regions=self.label_manager.foreground_regions if self.label_manager.has_regions else None,
+            aug_config=aug_config,
             ignore_label=self.label_manager.ignore_label)
 
         # validation pipeline
@@ -989,30 +1056,31 @@ class nnUNetTrainer(object):
         if sampling_categories is not None:
             from collections import Counter
             counts = Counter(sampling_categories.get(k, 0) for k in tr_keys)
-            # 依類別 1~4 排序輸出，未出現的類別為 0
-            category_ids = sorted(set(counts.keys()) | {1, 2, 3, 4})
+            # 從實際資料取得所有 category IDs（不再 hardcode 1-4）
+            category_ids = sorted(counts.keys())
+            fg_category_ids = [c for c in category_ids if c > 0]  # 排除 0（negative）
             lines = ["Sampling category counts (training set):", "=" * 40]
 
-            # 額外打印你設定的採樣比例（weights），例如 2:1:1:1
-            weight_ids = [1, 2, 3, 4]
-            weight_vals = [float(category_weights.get(c, 1.0)) if category_weights else 1.0 for c in weight_ids]
-            ratio_str = ":".join(str(int(w)) if abs(w - int(w)) < 1e-9 else ("%g" % w) for w in weight_vals)
-            w_sum = sum(weight_vals)
-            if w_sum > 0:
-                target_pct = ":".join("%.2f%%" % (w / w_sum * 100.0) for w in weight_vals)
+            # 打印採樣比例（只顯示實際存在的 category）
+            if enable_sampling_weights and category_weights and fg_category_ids:
+                weight_vals = [float(category_weights.get(c, 1.0)) for c in fg_category_ids]
+                ratio_str = ":".join(str(int(w)) if abs(w - int(w)) < 1e-9 else ("%g" % w) for w in weight_vals)
+                w_sum = sum(weight_vals)
+                target_pct = ":".join("%.2f%%" % (w / w_sum * 100.0) for w in weight_vals) if w_sum > 0 else "N/A"
+                cat_labels = ":".join(str(c) for c in fg_category_ids)
+                lines.append("Configured sampling ratio (Category %s weights): %s" % (cat_labels, ratio_str))
+                lines.append("Configured sampling target proportions (normalized): %s" % target_pct)
             else:
-                target_pct = ":".join("0.00%%" for _ in weight_vals)
-            lines.append("Configured sampling ratio (Category 1-4 weights): %s" % ratio_str)
-            lines.append("Configured sampling target proportions (normalized): %s" % target_pct)
+                lines.append("Sampling weights: 未啟用（uniform sampling）")
             lines.append("Sampling category weight mode: %s" % sampling_weight_mode)
 
-            # 校正後（依實際 sampling_probabilities 反推）的期望類別抽樣比例
-            if sampling_probabilities is not None:
+            # 校正後的期望類別抽樣比例
+            if sampling_probabilities is not None and enable_sampling_weights:
                 expected_mass = {}
                 for k, p in zip(tr_keys, sampling_probabilities):
                     c = sampling_categories.get(k, 0)
                     expected_mass[c] = expected_mass.get(c, 0.0) + float(p)
-                expected_ids = sorted(set(expected_mass.keys()) | {1, 2, 3, 4})
+                expected_ids = sorted(expected_mass.keys())
                 expected_pct = ":".join("%.2f%%" % (expected_mass.get(c, 0.0) * 100.0) for c in expected_ids)
                 lines.append("Corrected expected sampling proportions (by category, from probabilities): %s" % expected_pct)
             lines.append("-" * 40)
@@ -1057,9 +1125,37 @@ class nnUNetTrainer(object):
             f"compute_positives={compute_positives} (僅 classifier 架構才計算 positives label)",
             also_print_to_console=True
         )
+
+        best_val_classes = getattr(self, "BEST_VAL_CLASSES", None)
+        if best_val_classes is not None:
+            self.print_to_log_file(
+                f"BEST_VAL_CLASSES={best_val_classes} → best checkpoint 只看 class {best_val_classes} 的 dice",
+                also_print_to_console=True
+            )
+        else:
+            self.print_to_log_file(
+                "BEST_VAL_CLASSES=None → best checkpoint 看全部 foreground class 的 dice 平均",
+                also_print_to_console=True
+            )
         if cls_foreground_labels is not None:
             self.print_to_log_file(
                 f"CLS_FOREGROUND_LABELS={cls_foreground_labels} (分類頭只看這些 label 判斷 positive)",
+                also_print_to_console=True
+            )
+
+        # 梯度累積
+        ga_enabled = getattr(self, "ENABLE_GRADIENT_ACCUMULATION", False)
+        ga_steps = getattr(self, "GRADIENT_ACCUMULATION_STEPS", 1)
+        if ga_enabled and ga_steps > 1:
+            effective_batch = self.batch_size * ga_steps
+            self.print_to_log_file(
+                f"GRADIENT_ACCUMULATION=ON → 每 {ga_steps} 步累積一次（"
+                f"實際 batch={self.batch_size}, 等效 batch={effective_batch}）",
+                also_print_to_console=True
+            )
+        else:
+            self.print_to_log_file(
+                "GRADIENT_ACCUMULATION=OFF → 每步都更新（標準模式）",
                 also_print_to_console=True
             )
 
@@ -1119,7 +1215,11 @@ class nnUNetTrainer(object):
                                 is_cascaded: bool = False,
                                 foreground_labels: Union[Tuple[int, ...], List[int]] = None,
                                 regions: List[Union[List[int], Tuple[int, ...], int]] = None,
-                                ignore_label: int = None) -> AbstractTransform:
+                                ignore_label: int = None,
+                                aug_config: dict = None) -> AbstractTransform:
+        # aug_config: recipe 的 augmentation 設定（dict），None=使用預設值
+        ac = aug_config or {}
+
         tr_transforms = []
         if do_dummy_2d_data_aug:
             ignore_axes = (0,)
@@ -1129,35 +1229,67 @@ class nnUNetTrainer(object):
             patch_size_spatial = patch_size
             ignore_axes = None
 
+        # 空間變換（旋轉 + 縮放 + 彈性形變）
+        do_rotation = ac.get("rotation", True)
+        do_scale = ac.get("scaling", True)
+        do_elastic = ac.get("elastic_deformation", False)
+        scale_range = tuple(ac.get("scaling_range", [0.7, 1.4]))
+        rot_p = ac.get("rotation_p", 0.2)
+        scale_p = ac.get("scaling_p", 0.2)
+
         tr_transforms.append(SpatialTransform(
             patch_size_spatial, patch_center_dist_from_border=None,
-            do_elastic_deform=False, alpha=(0, 0), sigma=(0, 0),
-            do_rotation=True, angle_x=rotation_for_DA['x'], angle_y=rotation_for_DA['y'], angle_z=rotation_for_DA['z'],
-            p_rot_per_axis=1,  # todo experiment with this
-            do_scale=True, scale=(0.7, 1.4),
+            do_elastic_deform=do_elastic, alpha=(0, 900), sigma=(9, 13),
+            do_rotation=do_rotation, angle_x=rotation_for_DA['x'], angle_y=rotation_for_DA['y'], angle_z=rotation_for_DA['z'],
+            p_rot_per_axis=1,
+            do_scale=do_scale, scale=scale_range,
             border_mode_data="constant", border_cval_data=0, order_data=order_resampling_data,
             border_mode_seg="constant", border_cval_seg=border_val_seg, order_seg=order_resampling_seg,
-            random_crop=False,  # random cropping is part of our dataloaders
-            p_el_per_sample=0, p_scale_per_sample=0.2, p_rot_per_sample=0.2,
-            independent_scale_for_each_axis=False  # todo experiment with this
+            random_crop=False,
+            p_el_per_sample=0.2 if do_elastic else 0,
+            p_scale_per_sample=scale_p,
+            p_rot_per_sample=rot_p,
+            independent_scale_for_each_axis=False
         ))
 
         if do_dummy_2d_data_aug:
             tr_transforms.append(Convert2DTo3DTransform())
 
-        tr_transforms.append(GaussianNoiseTransform(p_per_sample=0.1))
-        tr_transforms.append(GaussianBlurTransform((0.5, 1.), different_sigma_per_channel=True, p_per_sample=0.2,
-                                                   p_per_channel=0.5))
-        tr_transforms.append(BrightnessMultiplicativeTransform(multiplier_range=(0.75, 1.25), p_per_sample=0.15))
-        tr_transforms.append(ContrastAugmentationTransform(p_per_sample=0.15))
-        # tr_transforms.append(SimulateLowResolutionTransform(zoom_range=(0.5, 1), per_channel=True,
-        #                                                     p_per_channel=0.5,
-        #                                                     order_downsample=0, order_upsample=3, p_per_sample=0.25,
-        #                                                     ignore_axes=ignore_axes))
-        tr_transforms.append(GammaTransform((0.7, 1.5), True, True, retain_stats=True, p_per_sample=0.1))
-        tr_transforms.append(GammaTransform((0.7, 1.5), False, True, retain_stats=True, p_per_sample=0.3))
+        # 高斯雜訊
+        if ac.get("gaussian_noise", True):
+            tr_transforms.append(GaussianNoiseTransform(p_per_sample=ac.get("gaussian_noise_p", 0.1)))
 
-        if mirror_axes is not None and len(mirror_axes) > 0:
+        # 高斯模糊
+        if ac.get("gaussian_blur", True):
+            tr_transforms.append(GaussianBlurTransform((0.5, 1.), different_sigma_per_channel=True,
+                                                       p_per_sample=ac.get("gaussian_blur_p", 0.2),
+                                                       p_per_channel=0.5))
+
+        # 亮度乘法
+        if ac.get("brightness_multiply", True):
+            tr_transforms.append(BrightnessMultiplicativeTransform(multiplier_range=(0.75, 1.25),
+                                                                    p_per_sample=ac.get("brightness_p", 0.15)))
+
+        # 對比度增強
+        if ac.get("contrast", True):
+            tr_transforms.append(ContrastAugmentationTransform(p_per_sample=ac.get("contrast_p", 0.15)))
+
+        # 低解析度模擬
+        if ac.get("simulate_low_resolution", False):
+            zoom = tuple(ac.get("simulate_low_resolution_zoom", [0.5, 1.0]))
+            tr_transforms.append(SimulateLowResolutionTransform(
+                zoom_range=zoom, per_channel=True, p_per_channel=0.5,
+                order_downsample=0, order_upsample=3,
+                p_per_sample=ac.get("simulate_low_resolution_p", 0.25),
+                ignore_axes=ignore_axes))
+
+        # Gamma 轉換（兩組）
+        if ac.get("gamma_transform", True):
+            tr_transforms.append(GammaTransform((0.7, 1.5), True, True, retain_stats=True, p_per_sample=0.1))
+            tr_transforms.append(GammaTransform((0.7, 1.5), False, True, retain_stats=True, p_per_sample=0.3))
+
+        # 鏡像翻轉
+        if ac.get("mirror", True) and mirror_axes is not None and len(mirror_axes) > 0:
             tr_transforms.append(MirrorTransform(mirror_axes))
 
         if use_mask_for_norm is not None and any(use_mask_for_norm):
@@ -1316,11 +1448,16 @@ class nnUNetTrainer(object):
                 positive = torch.from_numpy(positive)
             positive = positive.to(self.device, non_blocking=True)
 
-        self.optimizer.zero_grad()
-        # Autocast is a little bitch.
-        # If the device_type is 'cpu' then it's slow as heck and needs to be disabled.
-        # If the device_type is 'mps' then it will complain that mps is not implemented, even if enabled=False is set. Whyyyyyyy. (this is why we don't make use of enabled=False)
-        # So autocast will only be active if we have a cuda device.
+        # 梯度累積：只在累積週期的第一步 zero_grad
+        accum_steps = self.GRADIENT_ACCUMULATION_STEPS if self.ENABLE_GRADIENT_ACCUMULATION else 1
+        if not hasattr(self, '_accum_counter'):
+            self._accum_counter = 0
+        is_first_accum = (self._accum_counter % accum_steps == 0)
+        is_last_accum = ((self._accum_counter + 1) % accum_steps == 0)
+
+        if is_first_accum:
+            self.optimizer.zero_grad()
+
         with autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
             if self.has_cls_head:
                 output_seg, output_cls = self.network(data)
@@ -1335,6 +1472,10 @@ class nnUNetTrainer(object):
             else:
                 l = seg_l
 
+            # 梯度累積：loss 除以累積步數（等效於大 batch 的平均）
+            if accum_steps > 1:
+                l = l / accum_steps
+
             # 額外 loss 分項 + 每層 dice（僅 deep supervision logging 開啟時）
             if self.enable_deep_supervision_logging:
                 ce_l = self.ce_loss(output_seg, target)
@@ -1345,14 +1486,18 @@ class nnUNetTrainer(object):
 
         if self.grad_scaler is not None:
             self.grad_scaler.scale(l).backward()
-            self.grad_scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.network.parameters(), 12)
-            self.grad_scaler.step(self.optimizer)
-            self.grad_scaler.update()
+            if is_last_accum:
+                self.grad_scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.network.parameters(), 12)
+                self.grad_scaler.step(self.optimizer)
+                self.grad_scaler.update()
         else:
             l.backward()
-            torch.nn.utils.clip_grad_norm_(self.network.parameters(), 12)
-            self.optimizer.step()
+            if is_last_accum:
+                torch.nn.utils.clip_grad_norm_(self.network.parameters(), 12)
+                self.optimizer.step()
+
+        self._accum_counter += 1
 
         # classification metrics (only when has_cls_head)
         if self.has_cls_head:
@@ -1865,7 +2010,8 @@ class nnUNetTrainer(object):
             label = label or key
             val = np.round(self.logger.my_fantastic_logging[key][-1], decimals=4)
             self.print_to_log_file(label, val)
-            mlflow.log_metric(label, val, step=self.current_epoch)
+            if not self.DISABLE_BUILTIN_MLFLOW:
+                mlflow.log_metric(label, val, step=self.current_epoch)
 
         _log_print('train_losses', 'train_loss')
         _log_print('train_seg_losses', 'train_seg_loss')
@@ -1914,8 +2060,9 @@ class nnUNetTrainer(object):
                 self.print_to_log_file('EMA val Pseudo dice per class',
                                        [np.round(i, decimals=4) for i in
                                         self.logger.my_fantastic_logging['ema_dice_per_class_or_region'][-1]])
-            mlflow.log_metric("ema_val_loss", np.round(ema_loss, decimals=4), step=self.current_epoch)
-            mlflow.log_metric("ema_val_pseudo_dice", np.round(ema_dice, decimals=4), step=self.current_epoch)
+            if not self.DISABLE_BUILTIN_MLFLOW:
+                mlflow.log_metric("ema_val_loss", np.round(ema_loss, decimals=4), step=self.current_epoch)
+                mlflow.log_metric("ema_val_pseudo_dice", np.round(ema_dice, decimals=4), step=self.current_epoch)
 
         if self.enable_deep_supervision_logging:
             for i in range(self.num_deep_supervision_levels):
@@ -1925,17 +2072,22 @@ class nnUNetTrainer(object):
         self.print_to_log_file(
             f"Epoch time: {np.round(self.logger.my_fantastic_logging['epoch_end_timestamps'][-1] - self.logger.my_fantastic_logging['epoch_start_timestamps'][-1], decimals=2)} s")
 
-        mlflow.log_metric("train_loss", np.round(self.logger.my_fantastic_logging['train_losses'][-1], decimals=4), step=self.current_epoch)
-        mlflow.log_metric("train_seg_loss", np.round(self.logger.my_fantastic_logging['train_seg_losses'][-1], decimals=4), step=self.current_epoch)
-        mlflow.log_metric("train pseudo dice", np.round(self.logger.my_fantastic_logging['train_mean_fg_dice'][-1], decimals=4), step=self.current_epoch)
-        mlflow.log_metric("train pseudo dice mov. avg.", np.round(self.logger.my_fantastic_logging['train_ema_fg_dice'][-1], decimals=4), step=self.current_epoch)
-        mlflow.log_metric("val pseudo dice", np.round(self.logger.my_fantastic_logging['mean_fg_dice'][-1], decimals=4), step=self.current_epoch)
-        mlflow.log_metric("val pseudo dice  mov. avg.", np.round(self.logger.my_fantastic_logging['ema_fg_dice'][-1], decimals=4), step=self.current_epoch)
+        if not self.DISABLE_BUILTIN_MLFLOW:
+            mlflow.log_metric("train_loss", np.round(self.logger.my_fantastic_logging['train_losses'][-1], decimals=4), step=self.current_epoch)
+            mlflow.log_metric("train_seg_loss", np.round(self.logger.my_fantastic_logging['train_seg_losses'][-1], decimals=4), step=self.current_epoch)
+            mlflow.log_metric("train pseudo dice", np.round(self.logger.my_fantastic_logging['train_mean_fg_dice'][-1], decimals=4), step=self.current_epoch)
+            mlflow.log_metric("train pseudo dice mov. avg.", np.round(self.logger.my_fantastic_logging['train_ema_fg_dice'][-1], decimals=4), step=self.current_epoch)
+            mlflow.log_metric("val pseudo dice", np.round(self.logger.my_fantastic_logging['mean_fg_dice'][-1], decimals=4), step=self.current_epoch)
+            mlflow.log_metric("val pseudo dice  mov. avg.", np.round(self.logger.my_fantastic_logging['ema_fg_dice'][-1], decimals=4), step=self.current_epoch)
 
         # handling periodic checkpointing
         current_epoch = self.current_epoch
         if (current_epoch + 1) % self.save_every == 0 and current_epoch != (self.num_epochs - 1):
             self.save_checkpoint(join(self.output_folder, 'checkpoint_latest.pth'))
+
+        # 追蹤本 epoch 是否觸發 new best EMA（給 metrics CSV 用）
+        _prev_best_ema = self._best_ema
+        _prev_best_ema_model_dice = self._best_ema_model_dice
 
         # handle 'best' checkpointing
         # 如果指定了 BEST_VAL_CLASSES，根據指定 class 的 dice 判斷 best；否則用全類別 ema_fg_dice
@@ -1997,11 +2149,121 @@ class nnUNetTrainer(object):
                     if self.early_stopping_counter >= self.early_stopping_patience:
                         self.should_stop_training = True
                         self.print_to_log_file(f"Early Stopping: Patience ({self.early_stopping_patience}) reached. "
-                                             f"Best val EMA pseudo Dice: {np.round(self.early_stopping_best_metric, decimals=4)}", 
+                                             f"Best val EMA pseudo Dice: {np.round(self.early_stopping_best_metric, decimals=4)}",
                                              also_print_to_console=True)
                         self.print_to_log_file(f"Early Stopping: Training will stop after this epoch.", also_print_to_console=True)
 
+        # 計算本 epoch 是否觸發 new best EMA（給 metrics CSV）
+        _new_best_this_epoch = None
+        if self._best_ema is not None and self._best_ema != _prev_best_ema:
+            _new_best_this_epoch = float(self._best_ema)
+        if self._best_ema_model_dice is not None and self._best_ema_model_dice != _prev_best_ema_model_dice:
+            # 後觸發者覆蓋（與 log parser 行為一致）
+            _new_best_this_epoch = float(self._best_ema_model_dice)
+
+        # 寫入 training_metrics.csv（直接記錄關鍵指標，免去解析 training_log.txt）
+        try:
+            self._write_metrics_csv(new_best_ema=_new_best_this_epoch)
+        except Exception as _csv_err:
+            self.print_to_log_file(f"[metrics_csv] 寫入失敗（非致命）：{_csv_err}")
+
         self.current_epoch += 1
+
+    def _write_metrics_csv(self, new_best_ema=None):
+        """寫入本 epoch 的 metrics 到 training_metrics.csv。
+
+        - 路徑：self.output_folder/training_metrics.csv
+        - resume / continue training 時，相同 epoch 的 row 會被取代（不重複）
+        - DDP 時只有 local_rank=0 寫
+        - pandas 缺失時自動 skip（非致命）
+        """
+        if getattr(self, 'local_rank', 0) != 0:
+            return
+        try:
+            import pandas as pd
+        except ImportError:
+            return
+
+        import os as _os
+        csv_path = join(self.output_folder, 'training_metrics.csv')
+        log = self.logger.my_fantastic_logging
+
+        def _last_scalar(key):
+            if key in log and len(log[key]) > 0:
+                v = log[key][-1]
+                if isinstance(v, (list, tuple, np.ndarray)):
+                    return float(v[0]) if len(v) > 0 else float('nan')
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return float('nan')
+            return float('nan')
+
+        def _last_list(key):
+            """取最後一次的 per-class list。回傳 [] 表示沒值。"""
+            if key in log and len(log[key]) > 0:
+                v = log[key][-1]
+                if isinstance(v, (list, tuple, np.ndarray)):
+                    return [float(x) for x in v]
+                try:
+                    return [float(v)]
+                except (TypeError, ValueError):
+                    return []
+            return []
+
+        # epoch time
+        ts_start = _last_scalar('epoch_start_timestamps')
+        ts_end = _last_scalar('epoch_end_timestamps')
+        epoch_time_s = ts_end - ts_start if not (np.isnan(ts_start) or np.isnan(ts_end)) else float('nan')
+
+        row = {
+            'epoch': int(self.current_epoch),
+            'lr': _last_scalar('lrs'),
+            'train_loss': _last_scalar('train_losses'),
+            'train_seg_loss': _last_scalar('train_seg_losses'),
+            'val_loss': _last_scalar('val_losses'),
+            'val_seg_loss': _last_scalar('val_seg_losses'),
+            'train_dice': _last_scalar('train_dice_per_class_or_region'),  # 第一個前景類別（向後相容）
+            'val_dice': _last_scalar('dice_per_class_or_region'),
+            'ema_val_loss': _last_scalar('ema_val_losses'),
+            'ema_val_dice': _last_scalar('ema_mean_fg_dice'),
+            'epoch_time_s': epoch_time_s,
+            'new_best_ema': float(new_best_ema) if new_best_ema is not None else float('nan'),
+        }
+
+        # 每個前景類別獨立的 dice 欄位（multi-class 分析用，class 數量由 dataset 決定）
+        for i, d in enumerate(_last_list('train_dice_per_class_or_region')):
+            row[f'train_dice_class_{i}'] = d
+        for i, d in enumerate(_last_list('dice_per_class_or_region')):
+            row[f'val_dice_class_{i}'] = d
+        for i, d in enumerate(_last_list('ema_dice_per_class_or_region')):
+            row[f'ema_val_dice_class_{i}'] = d
+        if getattr(self, 'has_cls_head', False):
+            row['train_cls_loss'] = _last_scalar('train_cls_losses')
+            row['train_accuracy'] = _last_scalar('train_accuracys')
+            row['train_sensitivity'] = _last_scalar('train_sensitivitys')
+            row['train_specificity'] = _last_scalar('train_specificitys')
+            row['val_cls_loss'] = _last_scalar('val_cls_losses')
+            row['val_accuracy'] = _last_scalar('val_accuracys')
+            row['val_sensitivity'] = _last_scalar('val_sensitivitys')
+            row['val_specificity'] = _last_scalar('val_specificitys')
+
+        # Replace existing row for this epoch (idempotent on resume)
+        if _os.path.exists(csv_path):
+            try:
+                existing = pd.read_csv(csv_path)
+                if 'epoch' in existing.columns:
+                    existing = existing[existing['epoch'] != self.current_epoch]
+            except Exception:
+                existing = pd.DataFrame()
+        else:
+            existing = pd.DataFrame()
+
+        combined = pd.concat([existing, pd.DataFrame([row])], ignore_index=True)
+        # 確保 epoch 升冪排序
+        if 'epoch' in combined.columns:
+            combined = combined.sort_values('epoch').reset_index(drop=True)
+        combined.to_csv(csv_path, index=False)
 
     def save_checkpoint(self, filename: str) -> None:
         if self.local_rank == 0:
@@ -2226,8 +2488,7 @@ class nnUNetTrainer(object):
         self.set_deep_supervision_enabled(True)
 
     def run_training(self):
-        ## Auto log all MLflow entities
-        mlflow.pytorch.autolog()
+        from contextlib import nullcontext
 
         # 根據程式所在的資料夾名稱動態設定 run_name
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -2245,23 +2506,29 @@ class nnUNetTrainer(object):
         print('enable_early_stopping:', self.enable_early_stopping)
         print('early_stopping_patience:', self.early_stopping_patience)
         print('early_stopping_min_delta:', self.early_stopping_min_delta)
-        
-        experiment = mlflow.get_experiment_by_name(run_name)
-        if experiment is None:
-            experiment_id = mlflow.create_experiment(run_name)
-        else:
-            experiment_id = experiment.experiment_id
 
-        with mlflow.start_run(run_name=run_name, experiment_id=experiment_id): # 所有的mlflow寫入指令必須放置在 mlflow.start_run 範圍中. 
+        # 當 MUTP 呼叫時，跳過 Trainer 內建的 MLflow（由 MUTP watcher thread 追蹤）
+        if self.DISABLE_BUILTIN_MLFLOW:
+            mlflow_ctx = nullcontext()
+        else:
+            mlflow.pytorch.autolog()
+            experiment = mlflow.get_experiment_by_name(run_name)
+            if experiment is None:
+                experiment_id = mlflow.create_experiment(run_name)
+            else:
+                experiment_id = experiment.experiment_id
+            mlflow_ctx = mlflow.start_run(run_name=run_name, experiment_id=experiment_id)
+
+        with mlflow_ctx:
             self.on_train_start()
-            ml_params = {
-                "epochs": self.num_epochs,
-                "learning_rate": self.initial_lr,
-                "batch_size": self.configuration_manager.batch_size,
-                "oversample_foreground_percent": self.oversample_foreground_percent
-            }
-            # Log training parameters.
-            mlflow.log_params(ml_params)
+            if not self.DISABLE_BUILTIN_MLFLOW:
+                ml_params = {
+                    "epochs": self.num_epochs,
+                    "learning_rate": self.initial_lr,
+                    "batch_size": self.configuration_manager.batch_size,
+                    "oversample_foreground_percent": self.oversample_foreground_percent
+                }
+                mlflow.log_params(ml_params)
             for epoch in range(self.current_epoch, self.num_epochs):
                 self.on_epoch_start() #只有一個訊息而已
 
@@ -2308,7 +2575,7 @@ class nnUNetTrainer(object):
                         self._on_ema_validation_epoch_end(ema_val_outputs)
 
                 self.on_epoch_end()
-                
+
                 # Check if early stopping is triggered
                 if self.should_stop_training:
                     self.print_to_log_file(f"Early Stopping: Training stopped at epoch {self.current_epoch}", also_print_to_console=True)

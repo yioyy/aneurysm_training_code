@@ -83,3 +83,6 @@ Thumbs.db
 *.bak
 *.tmp
 *.log
+
+# Claude 對話備份（私人，不上傳）
+conversation_nnResUNet_backup.txt

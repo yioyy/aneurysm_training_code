@@ -107,7 +107,11 @@ def get_trainer_from_args(dataset_name_or_id: Union[int, str],
                           enable_ema: bool = False,
                           ema_decay: float = 0.999,
                           cls_foreground_labels: Optional[list] = None,
-                          best_val_classes: Optional[list] = None):
+                          best_val_classes: Optional[list] = None,
+                          augmentation_config: Optional[dict] = None,
+                          enable_gradient_accumulation: bool = False,
+                          gradient_accumulation_steps: int = 1,
+                          disable_builtin_mlflow: bool = False):
     # load nnunet class and do sanity checks
     nnunet_trainer = recursive_find_python_class(join(nnunetv2.__path__[0], "training", "nnUNetTrainer"),
                                                 trainer_name, 'nnunetv2.training.nnUNetTrainer')
@@ -153,7 +157,23 @@ def get_trainer_from_args(dataset_name_or_id: Union[int, str],
         print(f'CLI: CLS_FOREGROUND_LABELS = {cls_foreground_labels} (分類頭只看這些 label 判斷 positive)')
     if best_val_classes is not None:
         nnunet_trainer.BEST_VAL_CLASSES = best_val_classes
-        print(f'CLI: BEST_VAL_CLASSES = {best_val_classes} (best checkpoint 根據這些 class index 的 dice 判斷)')
+
+    # augmentation config（from MUTP recipe）
+    if augmentation_config is not None:
+        nnunet_trainer.AUGMENTATION_CONFIG = augmentation_config
+        enabled = [k for k, v in augmentation_config.items() if v is True]
+        disabled = [k for k, v in augmentation_config.items() if v is False]
+        print(f'MUTP augmentation config: {len(enabled)} enabled, {len(disabled)} disabled')
+
+    # 梯度累積
+    if enable_gradient_accumulation and gradient_accumulation_steps > 1:
+        nnunet_trainer.ENABLE_GRADIENT_ACCUMULATION = True
+        nnunet_trainer.GRADIENT_ACCUMULATION_STEPS = gradient_accumulation_steps
+
+    # 當由 MUTP 呼叫時，關閉 Trainer 內建的 MLflow
+    if disable_builtin_mlflow:
+        nnunet_trainer.DISABLE_BUILTIN_MLFLOW = True
+        print('CLI: DISABLE_BUILTIN_MLFLOW = True (由 MUTP watcher thread 追蹤)')
 
     # handle dataset input. If it's an ID we need to convert to int from string
     if dataset_name_or_id.startswith('Dataset'):
@@ -233,7 +253,7 @@ def run_ddp(rank, dataset_name_or_id, configuration, fold, tr, p, use_compressed
             enable_sampling_weights, enable_normal_upsample,
             enable_deep_supervision_logging,
             enable_ema, ema_decay,
-            cls_foreground_labels, best_val_classes):
+            cls_foreground_labels, best_val_classes, augmentation_config, enable_gradient_accumulation, gradient_accumulation_steps):
     setup_ddp(rank, world_size)
     torch.cuda.set_device(torch.device('cuda', dist.get_rank()))
 
@@ -258,7 +278,10 @@ def run_ddp(rank, dataset_name_or_id, configuration, fold, tr, p, use_compressed
                                            enable_ema=enable_ema,
                                            ema_decay=ema_decay,
                                            cls_foreground_labels=cls_foreground_labels,
-                                           best_val_classes=best_val_classes)
+                                           best_val_classes=best_val_classes,
+                                           augmentation_config=augmentation_config,
+                                           enable_gradient_accumulation=enable_gradient_accumulation,
+                                           gradient_accumulation_steps=gradient_accumulation_steps)
 
     if disable_checkpointing:
         nnunet_trainer.disable_checkpointing = disable_checkpointing
@@ -310,7 +333,12 @@ def run_training(dataset_name_or_id: Union[str, int],
                  enable_ema: bool = False,
                  ema_decay: float = 0.999,
                  cls_foreground_labels: Optional[list] = None,
-                 best_val_classes: Optional[list] = None):
+                 best_val_classes: Optional[list] = None,
+                 augmentation_config: Optional[dict] = None,
+                 enable_gradient_accumulation: bool = False,
+                 gradient_accumulation_steps: int = 1,
+                 disable_builtin_mlflow: bool = False,
+                 skip_final_validation: bool = False):
     if isinstance(fold, str):
         if fold != 'all':
             try:
@@ -362,7 +390,10 @@ def run_training(dataset_name_or_id: Union[str, int],
                      enable_ema,
                      ema_decay,
                      cls_foreground_labels,
-                     best_val_classes),
+                     best_val_classes,
+                     augmentation_config,
+                     enable_gradient_accumulation,
+                     gradient_accumulation_steps),
                  nprocs=num_gpus,
                  join=True)
     else:
@@ -388,7 +419,11 @@ def run_training(dataset_name_or_id: Union[str, int],
                                                enable_ema=enable_ema,
                                                ema_decay=ema_decay,
                                                cls_foreground_labels=cls_foreground_labels,
-                                               best_val_classes=best_val_classes)
+                                               best_val_classes=best_val_classes,
+                                           augmentation_config=augmentation_config,
+                                           enable_gradient_accumulation=enable_gradient_accumulation,
+                                           gradient_accumulation_steps=gradient_accumulation_steps,
+                                           disable_builtin_mlflow=disable_builtin_mlflow)
 
         #已經確認load pretrain weights，所以先初始化一次
         if pretrained_weights is not None:
@@ -414,7 +449,8 @@ def run_training(dataset_name_or_id: Union[str, int],
         if not only_run_validation:
             nnunet_trainer.run_training()
 
-        nnunet_trainer.perform_actual_validation(export_validation_probabilities)
+        if not skip_final_validation:
+            nnunet_trainer.perform_actual_validation(export_validation_probabilities)
 
 
 def run_training_entry():
@@ -601,7 +637,8 @@ def run_training_entry():
                  enable_ema=args.enable_ema,
                  ema_decay=args.ema_decay,
                  cls_foreground_labels=cls_foreground_labels,
-                 best_val_classes=best_val_classes)
+                 best_val_classes=best_val_classes,
+                 augmentation_config=None)
 
 
 if __name__ == '__main__':
