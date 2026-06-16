@@ -14,6 +14,135 @@ import numpy as np
 import torch
 from batchgenerators.dataloading.single_threaded_augmenter import SingleThreadedAugmenter
 from batchgenerators.transforms.abstract_transforms import AbstractTransform, Compose
+
+
+class ProtectedChannelsWrapper(AbstractTransform):
+    """把一個 transform 包起來，套用前 snapshot 受保護的 channel，套完 restore。
+
+    用途：SynthSeg label channel、ADC 物理量 channel 等，不該被亮度/對比/雜訊/gamma 擾動的 channel。
+    空間變換（rotation/scaling/mirror）跟整批的 spatial geometry 對齊，不該受此保護。
+
+    Args:
+        inner: 內層 transform（會被套到 data dict 全部 channel）
+        protected_channels: 要保護的 channel index list（in data shape [B, C, ...]）
+        data_key: data dict 裡 image batch 的 key（預設 'data'）
+    """
+
+    def __init__(self, inner: AbstractTransform, protected_channels, data_key: str = 'data'):
+        self.inner = inner
+        self.protected_channels = sorted(set(int(c) for c in protected_channels))
+        self.data_key = data_key
+
+    def __call__(self, **data_dict):
+        if not self.protected_channels:
+            return self.inner(**data_dict)
+        data = data_dict.get(self.data_key)
+        if data is None:
+            return self.inner(**data_dict)
+        # data shape: [B, C, ...]; snapshot 受保護 channel
+        snapshot = data[:, self.protected_channels].copy()
+        data_dict = self.inner(**data_dict)
+        out = data_dict.get(self.data_key)
+        # transform 可能 in-place 或回傳新 array；都要 restore
+        out[:, self.protected_channels] = snapshot
+        data_dict[self.data_key] = out
+        return data_dict
+
+    def __repr__(self):
+        return f"ProtectedChannelsWrapper(protected={self.protected_channels}, inner={self.inner.__class__.__name__})"
+
+
+class LabelPreservingSpatialTransform(AbstractTransform):
+    """SpatialTransform 包裝：對指定 label channel 用 nearest interp（避免 cubic overshoot 破壞 categorical label）。
+
+    Cubic spline 內插（SpatialTransform 預設 order_data=3）對連續值影像沒問題，
+    但對 categorical anatomy label（如 SynthSeg）會在邊界產生 OVERSHOOT：
+        label 7 voxel 旁邊是 label 0 → cubic 內插出 8.5 → clamp 變 label 9（小腦）→ 完全錯位
+
+    解法：把 label channel 暫時從 'data' 移到 'seg' key，SpatialTransform 對 seg 用 order_seg
+    （我們設 0 = nearest），然後把結果搬回 data。SAME 旋轉/縮放/形變參數 → image 跟 label 空間對齊。
+
+    Args:
+        spatial_transform: 真實的 SpatialTransform 實體（必須已配置好參數）
+        label_channels: data 裡的哪些 channel 是 label channel（要走 nearest interp）
+    """
+
+    def __init__(self, spatial_transform, label_channels, data_key: str = 'data', seg_key: str = 'seg'):
+        self.spatial_transform = spatial_transform
+        self.label_channels = sorted(set(int(c) for c in label_channels))
+        self.data_key = data_key
+        self.seg_key = seg_key
+
+    def __call__(self, **data_dict):
+        if not self.label_channels:
+            return self.spatial_transform(**data_dict)
+        data = data_dict.get(self.data_key)
+        if data is None:
+            return self.spatial_transform(**data_dict)
+
+        # 1. 切出 image / label channels
+        n_ch = data.shape[1]
+        image_ch_idx = [c for c in range(n_ch) if c not in self.label_channels]
+        # 保持 channel 順序記憶（restore 用）
+        image_data = data[:, image_ch_idx]
+        label_data = data[:, self.label_channels]
+
+        # 2. 把 label 暫時併到 seg 裡（seg 在 SpatialTransform 用 order_seg 處理，預設 1=linear；
+        # 我們透過 setattr 改成 0=nearest 才能保 integer label）
+        original_seg = data_dict.get(self.seg_key, None)
+        if original_seg is not None:
+            combined_seg = np.concatenate([original_seg, label_data], axis=1)
+            n_orig_seg = original_seg.shape[1]
+        else:
+            combined_seg = label_data
+            n_orig_seg = 0
+
+        new_dict = dict(data_dict)
+        new_dict[self.data_key] = image_data
+        new_dict[self.seg_key] = combined_seg
+
+        # 3. 強制 order_seg=0 (nearest) + border_cval_seg=0（旋轉外圍當「腦外背景 label 0」）
+        #    記原值、套完還原
+        orig_order_seg = getattr(self.spatial_transform, 'order_seg', 1)
+        orig_border_cval_seg = getattr(self.spatial_transform, 'border_cval_seg', -1)
+        try:
+            self.spatial_transform.order_seg = 0
+            self.spatial_transform.border_cval_seg = 0  # background_outside_brain
+            out = self.spatial_transform(**new_dict)
+        finally:
+            self.spatial_transform.order_seg = orig_order_seg
+            self.spatial_transform.border_cval_seg = orig_border_cval_seg
+
+        # 4. 重組
+        new_image = out[self.data_key]
+        new_combined_seg = out[self.seg_key]
+        if n_orig_seg > 0:
+            new_seg = new_combined_seg[:, :n_orig_seg]
+            new_label = new_combined_seg[:, n_orig_seg:]
+        else:
+            new_seg = None
+            new_label = new_combined_seg
+
+        # 5. 按原 channel 順序 reconstruct data
+        out_data = np.empty(
+            (new_image.shape[0], n_ch) + new_image.shape[2:],
+            dtype=new_image.dtype,
+        )
+        out_data[:, image_ch_idx] = new_image
+        out_data[:, self.label_channels] = new_label
+
+        result = dict(out)
+        result[self.data_key] = out_data
+        if new_seg is not None:
+            result[self.seg_key] = new_seg
+        elif self.seg_key in result:
+            # 沒有 original seg，但 SpatialTransform 把 label 拿去當 seg，不該留在 seg 裡
+            del result[self.seg_key]
+        return result
+
+    def __repr__(self):
+        return (f"LabelPreservingSpatialTransform(label_channels={self.label_channels}, "
+                f"inner={self.spatial_transform.__class__.__name__})")
 from batchgenerators.transforms.color_transforms import BrightnessMultiplicativeTransform, \
     ContrastAugmentationTransform, GammaTransform
 from batchgenerators.transforms.noise_transforms import GaussianNoiseTransform, GaussianBlurTransform
@@ -923,6 +1052,39 @@ class nnUNetTrainer(object):
 
         # training pipeline — augmentation config log
         aug_config = getattr(self, 'AUGMENTATION_CONFIG', None) or {}
+
+        # 解析 noise_aug_channels / intensity_aug_channels → 反推各自要保護的 channel
+        # 拆 2 類：
+        #   noise（加法）— gaussian_noise，物理上模擬 scanner 噪聲，ADC 收
+        #   intensity（乘法/非線性）— gaussian_blur, brightness, contrast, gamma, simulate_low_resolution，ADC 保護
+        # 兩個 key 各自獨立，None=不保護任何 channel
+        if aug_config:
+            aug_config = dict(aug_config)  # 不污染上層的 AUGMENTATION_CONFIG
+            n_ch = self.num_input_channels
+            for key_in, key_out, label in [
+                ("noise_aug_channels", "_protected_noise_channels_resolved", "noise aug"),
+                ("intensity_aug_channels", "_protected_intensity_channels_resolved", "intensity aug"),
+            ]:
+                if aug_config.get(key_in) is not None:
+                    allow = set(int(c) for c in aug_config[key_in])
+                    protected = [c for c in range(n_ch) if c not in allow]
+                    aug_config[key_out] = protected
+                    self.print_to_log_file(
+                        f"[Channel-restricted {label}] {key_in}={sorted(allow)}, "
+                        f"protected={protected}（snapshot+restore）",
+                        also_print_to_console=True,
+                    )
+            # spatial_label_channels：SpatialTransform 對這些 channel 走 nearest interp
+            # （categorical label channel 不能用 cubic，會 overshoot 跳 label）
+            spatial_labels = aug_config.get("spatial_label_channels")
+            if spatial_labels:
+                aug_config["_spatial_label_channels_resolved"] = list(int(c) for c in spatial_labels)
+                self.print_to_log_file(
+                    f"[Label-preserving spatial] spatial_label_channels={sorted(spatial_labels)}"
+                    f"（這些 channel 在 SpatialTransform 走 nearest interp，避免 cubic overshoot）",
+                    also_print_to_console=True,
+                )
+
         if aug_config:
             aug_lines = ["", "=" * 60, "Data Augmentation Config（from MUTP recipe）", "=" * 60]
             # 開關
@@ -1220,6 +1382,24 @@ class nnUNetTrainer(object):
         # aug_config: recipe 的 augmentation 設定（dict），None=使用預設值
         ac = aug_config or {}
 
+        # 受保護 channel：套 transform 前 snapshot、套完 restore
+        # 拆 2 類（由 nnUNetTrainer 在呼叫此 method 前先解析放進 aug_config）：
+        #   _protected_noise_channels_resolved      — GaussianNoise 用（加法噪聲）
+        #   _protected_intensity_channels_resolved  — Brightness/Contrast/Gamma/Blur/SimLowRes 用（乘法/非線性）
+        protected_noise = list(ac.get("_protected_noise_channels_resolved", []) or [])
+        protected_intensity = list(ac.get("_protected_intensity_channels_resolved", []) or [])
+
+        def _protect_noise(transform):
+            if protected_noise:
+                return ProtectedChannelsWrapper(transform, protected_noise)
+            return transform
+
+        def _protect(transform):
+            """乘法/非線性 transform 用的保護（通常比 noise 嚴格）。"""
+            if protected_intensity:
+                return ProtectedChannelsWrapper(transform, protected_intensity)
+            return transform
+
         tr_transforms = []
         if do_dummy_2d_data_aug:
             ignore_axes = (0,)
@@ -1237,7 +1417,7 @@ class nnUNetTrainer(object):
         rot_p = ac.get("rotation_p", 0.2)
         scale_p = ac.get("scaling_p", 0.2)
 
-        tr_transforms.append(SpatialTransform(
+        _spatial = SpatialTransform(
             patch_size_spatial, patch_center_dist_from_border=None,
             do_elastic_deform=do_elastic, alpha=(0, 900), sigma=(9, 13),
             do_rotation=do_rotation, angle_x=rotation_for_DA['x'], angle_y=rotation_for_DA['y'], angle_z=rotation_for_DA['z'],
@@ -1250,43 +1430,56 @@ class nnUNetTrainer(object):
             p_scale_per_sample=scale_p,
             p_rot_per_sample=rot_p,
             independent_scale_for_each_axis=False
-        ))
+        )
+        # 如果 recipe 標了 spatial_label_channels（如 SynthSeg ch2），用 LabelPreservingSpatialTransform
+        # 包起來：對 label channel 走 nearest interp 避 cubic overshoot
+        spatial_labels = ac.get("_spatial_label_channels_resolved", []) or []
+        if spatial_labels:
+            tr_transforms.append(LabelPreservingSpatialTransform(_spatial, spatial_labels))
+        else:
+            tr_transforms.append(_spatial)
 
         if do_dummy_2d_data_aug:
             tr_transforms.append(Convert2DTo3DTransform())
 
-        # 高斯雜訊
+        # 高斯雜訊（加法 noise → 用 _protect_noise，預設可讓 ADC 收）
         if ac.get("gaussian_noise", True):
-            tr_transforms.append(GaussianNoiseTransform(p_per_sample=ac.get("gaussian_noise_p", 0.1)))
+            tr_transforms.append(_protect_noise(
+                GaussianNoiseTransform(p_per_sample=ac.get("gaussian_noise_p", 0.1))))
 
         # 高斯模糊
         if ac.get("gaussian_blur", True):
-            tr_transforms.append(GaussianBlurTransform((0.5, 1.), different_sigma_per_channel=True,
-                                                       p_per_sample=ac.get("gaussian_blur_p", 0.2),
-                                                       p_per_channel=0.5))
+            tr_transforms.append(_protect(
+                GaussianBlurTransform((0.5, 1.), different_sigma_per_channel=True,
+                                      p_per_sample=ac.get("gaussian_blur_p", 0.2),
+                                      p_per_channel=0.5)))
 
         # 亮度乘法
         if ac.get("brightness_multiply", True):
-            tr_transforms.append(BrightnessMultiplicativeTransform(multiplier_range=(0.75, 1.25),
-                                                                    p_per_sample=ac.get("brightness_p", 0.15)))
+            tr_transforms.append(_protect(
+                BrightnessMultiplicativeTransform(multiplier_range=(0.75, 1.25),
+                                                  p_per_sample=ac.get("brightness_p", 0.15))))
 
         # 對比度增強
         if ac.get("contrast", True):
-            tr_transforms.append(ContrastAugmentationTransform(p_per_sample=ac.get("contrast_p", 0.15)))
+            tr_transforms.append(_protect(
+                ContrastAugmentationTransform(p_per_sample=ac.get("contrast_p", 0.15))))
 
-        # 低解析度模擬
+        # 低解析度模擬（nearest 下採樣 + cubic 上採樣會破壞 integer label / 物理量）
         if ac.get("simulate_low_resolution", False):
             zoom = tuple(ac.get("simulate_low_resolution_zoom", [0.5, 1.0]))
-            tr_transforms.append(SimulateLowResolutionTransform(
+            tr_transforms.append(_protect(SimulateLowResolutionTransform(
                 zoom_range=zoom, per_channel=True, p_per_channel=0.5,
                 order_downsample=0, order_upsample=3,
                 p_per_sample=ac.get("simulate_low_resolution_p", 0.25),
-                ignore_axes=ignore_axes))
+                ignore_axes=ignore_axes)))
 
         # Gamma 轉換（兩組）
         if ac.get("gamma_transform", True):
-            tr_transforms.append(GammaTransform((0.7, 1.5), True, True, retain_stats=True, p_per_sample=0.1))
-            tr_transforms.append(GammaTransform((0.7, 1.5), False, True, retain_stats=True, p_per_sample=0.3))
+            tr_transforms.append(_protect(
+                GammaTransform((0.7, 1.5), True, True, retain_stats=True, p_per_sample=0.1)))
+            tr_transforms.append(_protect(
+                GammaTransform((0.7, 1.5), False, True, retain_stats=True, p_per_sample=0.3)))
 
         # 鏡像翻轉
         if ac.get("mirror", True) and mirror_axes is not None and len(mirror_axes) > 0:

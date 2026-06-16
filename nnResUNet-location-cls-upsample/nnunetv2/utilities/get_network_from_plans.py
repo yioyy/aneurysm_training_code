@@ -4,7 +4,11 @@ from dynamic_network_architectures.initialization.weight_init import init_last_b
 from nnunetv2.utilities.network_initialization import InitWeights_He
 from nnunetv2.utilities.unet_v2 import (ResidualEncoderUNetClassifier, ResidualEncoderUNetClassifier2D,
                                         ResidualEncoderUNetAttentionClassifier, ResidualEncoderUNetAttentionClassifier2D,
-                                        ResidualEncoderUNetGuidedClassifier, ResidualEncoderUNetGuidedClassifier2D)
+                                        ResidualEncoderUNetGuidedClassifier, ResidualEncoderUNetGuidedClassifier2D,
+                                        ResidualEncoderUNet_DeepConcat,
+                                        ResidualEncoderUNet_SPADEDecoder,
+                                        ResidualEncoderUNet_SPADEDecoderAlpha,
+                                        ResidualEncoderUNet_SPADEFull)
 from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager, PlansManager
 from torch import nn
 
@@ -37,6 +41,10 @@ def get_network_from_plans(plans_manager: PlansManager,
         'ResidualEncoderUNetAttentionClassifier2D': ResidualEncoderUNetAttentionClassifier2D,
         'ResidualEncoderUNetGuidedClassifier': ResidualEncoderUNetGuidedClassifier,
         'ResidualEncoderUNetGuidedClassifier2D': ResidualEncoderUNetGuidedClassifier2D,
+        'ResidualEncoderUNet_DeepConcat': ResidualEncoderUNet_DeepConcat,
+        'ResidualEncoderUNet_SPADEDecoder': ResidualEncoderUNet_SPADEDecoder,
+        'ResidualEncoderUNet_SPADEDecoderAlpha': ResidualEncoderUNet_SPADEDecoderAlpha,
+        'ResidualEncoderUNet_SPADEFull': ResidualEncoderUNet_SPADEFull,
     }
     _default_kwargs = {
         'conv_bias': True,
@@ -55,7 +63,11 @@ def get_network_from_plans(plans_manager: PlansManager,
 
     _residual_classes = (ResidualEncoderUNet, ResidualEncoderUNetClassifier, ResidualEncoderUNetClassifier2D,
                          ResidualEncoderUNetAttentionClassifier, ResidualEncoderUNetAttentionClassifier2D,
-                         ResidualEncoderUNetGuidedClassifier, ResidualEncoderUNetGuidedClassifier2D)
+                         ResidualEncoderUNetGuidedClassifier, ResidualEncoderUNetGuidedClassifier2D,
+                         ResidualEncoderUNet_DeepConcat,
+                         ResidualEncoderUNet_SPADEDecoder,
+                         ResidualEncoderUNet_SPADEDecoderAlpha,
+                         ResidualEncoderUNet_SPADEFull)
     conv_or_blocks_per_stage = {
         'n_blocks_per_stage' if network_class in _residual_classes else 'n_conv_per_stage': configuration_manager.n_conv_per_stage_encoder,
         'n_conv_per_stage_decoder': configuration_manager.n_conv_per_stage_decoder
