@@ -17,7 +17,8 @@ def get_network_from_plans(plans_manager: PlansManager,
                            dataset_json: dict,
                            configuration_manager: ConfigurationManager,
                            num_input_channels: int,
-                           deep_supervision: bool = True):
+                           deep_supervision: bool = True,
+                           extra_kwargs: dict = None):
     """
     we may have to change this in the future to accommodate other plans -> network mappings
 
@@ -59,6 +60,8 @@ def get_network_from_plans(plans_manager: PlansManager,
                                                               'into either this ' \
                                                               'function (get_network_from_plans) or ' \
                                                               'the init of your nnUNetModule to accomodate that.'
+    if extra_kwargs:
+        kwargs[segmentation_network_class_name].update(extra_kwargs)
     network_class = mapping[segmentation_network_class_name]
 
     _residual_classes = (ResidualEncoderUNet, ResidualEncoderUNetClassifier, ResidualEncoderUNetClassifier2D,

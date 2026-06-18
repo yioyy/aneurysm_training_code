@@ -320,19 +320,21 @@ class SPADEBlock(nn.Module):
         norm_op: Type[nn.Module],
         hidden_channels: int = 128,
         use_alpha: bool = False,
+        alpha_init: float = 0.0,
     ):
         super().__init__()
         self.use_alpha = use_alpha
+        self.alpha_init = alpha_init
         self.feature_channels = feature_channels
         self.norm = norm_op(feature_channels, affine=False)
         self.shared = conv_op(mask_classes, hidden_channels, kernel_size=3, padding=1)
         self.conv_gamma = conv_op(hidden_channels, feature_channels, kernel_size=3, padding=1)
         self.conv_beta = conv_op(hidden_channels, feature_channels, kernel_size=3, padding=1)
         if use_alpha:
-            # per-channel α，初始化 0 → 訓練起點 = baseline
+            # per-channel α，init=0 → 起點 = baseline；init=0.3 → 有 mask 起點影響
             spatial_dim = convert_conv_op_to_dim(conv_op)
             shape = [1, feature_channels] + [1] * spatial_dim
-            self.alpha = nn.Parameter(torch.zeros(*shape))
+            self.alpha = nn.Parameter(torch.full(shape, float(alpha_init)))
 
     def forward(self, x: torch.Tensor, mask_oh: torch.Tensor) -> torch.Tensor:
         x_norm = self.norm(x)
@@ -384,6 +386,7 @@ class ResidualEncoderUNet_SPADE(nn.Module):
         inject_in_encoder: bool = False,
         use_alpha: bool = False,
         spade_hidden_channels: int = 128,
+        spade_alpha_init: float = 0.0,
     ):
         super().__init__()
         if isinstance(features_per_stage, int):
@@ -425,6 +428,7 @@ class ResidualEncoderUNet_SPADE(nn.Module):
                 norm_op=spade_norm_op,
                 hidden_channels=spade_hidden_channels,
                 use_alpha=use_alpha,
+                alpha_init=spade_alpha_init,
             )
 
         if inject_in_encoder:

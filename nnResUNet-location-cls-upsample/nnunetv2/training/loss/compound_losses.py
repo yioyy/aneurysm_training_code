@@ -1,5 +1,5 @@
 import torch
-from nnunetv2.training.loss.dice import SoftDiceLoss, MemoryEfficientSoftDiceLoss, MemoryEfficientNewSoftDiceLoss, FocalTverskyLoss, MemoryEfficientLogDiceLoss, NewSoftDiceLoss
+from nnunetv2.training.loss.dice import SoftDiceLoss, MemoryEfficientSoftDiceLoss, MemoryEfficientNewSoftDiceLoss, FocalTverskyLoss, MemoryEfficientLogDiceLoss, NewSoftDiceLoss, TverskyLoss
 from nnunetv2.training.loss.robust_ce_loss import RobustCrossEntropyLoss, TopKLoss
 from nnunetv2.utilities.helpers import softmax_helper_dim1
 from torch import nn
@@ -55,6 +55,46 @@ class DC_and_CE_loss(nn.Module):
 
         result = self.weight_ce * ce_loss + self.weight_dice * dc_loss
         return result
+
+
+class Tversky_and_CE_loss(nn.Module):
+    """Tversky Loss + CrossEntropy（取代 DC_and_CE_loss 用於小病灶分割）。
+
+    跟 DC_and_CE_loss 介面對齊：
+        soft_dice_kwargs / tversky_kwargs: 內含 batch_dice, do_bg, smooth, ddp + alpha, beta
+        ce_kwargs: 給 RobustCrossEntropyLoss
+        weight_ce / weight_tversky: 兩部分權重
+
+    對小 lesion (infarct 等)：alpha=0.3, beta=0.7 (FN 罰更重，強迫找出小病灶)。
+    """
+
+    def __init__(self, tversky_kwargs, ce_kwargs, weight_ce=1, weight_tversky=1, ignore_label=None):
+        super().__init__()
+        if ignore_label is not None:
+            ce_kwargs['ignore_index'] = ignore_label
+
+        self.weight_tversky = weight_tversky
+        self.weight_ce = weight_ce
+        self.ignore_label = ignore_label
+
+        self.ce = RobustCrossEntropyLoss(**ce_kwargs)
+        self.tv = TverskyLoss(apply_nonlin=softmax_helper_dim1, **tversky_kwargs)
+
+    def forward(self, net_output: torch.Tensor, target: torch.Tensor):
+        if self.ignore_label is not None:
+            assert target.shape[1] == 1, 'ignore label is not implemented for one hot encoded target (Tversky_and_CE_loss)'
+            mask = (target != self.ignore_label).bool()
+            target_dice = torch.clone(target)
+            target_dice[target == self.ignore_label] = 0
+            num_fg = mask.sum()
+        else:
+            target_dice = target
+            mask = None
+
+        tv_loss = self.tv(net_output, target_dice, loss_mask=mask) if self.weight_tversky != 0 else 0
+        ce_loss = self.ce(net_output, target[:, 0].long()) \
+            if self.weight_ce != 0 and (self.ignore_label is None or num_fg > 0) else 0
+        return self.weight_ce * ce_loss + self.weight_tversky * tv_loss
 
 
 class DC_and_BCE_loss(nn.Module):

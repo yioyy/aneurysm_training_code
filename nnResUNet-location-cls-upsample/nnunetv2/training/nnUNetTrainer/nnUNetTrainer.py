@@ -172,7 +172,7 @@ from nnunetv2.training.dataloading.data_loader_3d import nnUNetDataLoader3D
 from nnunetv2.training.dataloading.nnunet_dataset import nnUNetDataset
 from nnunetv2.training.dataloading.utils import get_case_identifiers, unpack_dataset, build_sampling_probabilities
 from nnunetv2.training.logging.nnunet_logger import nnUNetLogger
-from nnunetv2.training.loss.compound_losses import DC_and_CE_loss, DC_and_BCE_loss, Log_DC_loss, CE_loss, DC_loss
+from nnunetv2.training.loss.compound_losses import DC_and_CE_loss, DC_and_BCE_loss, Log_DC_loss, CE_loss, DC_loss, Tversky_and_CE_loss
 from nnunetv2.training.loss.deep_supervision import DeepSupervisionWrapper
 from nnunetv2.training.loss.dice import get_tp_fp_fn_tn, MemoryEfficientSoftDiceLoss, MemoryEfficientLogDiceLoss, MemoryEfficientNewSoftDiceLoss, NewSoftDiceLoss
 from nnunetv2.training.lr_scheduler.polylr import PolyLRScheduler
@@ -243,6 +243,11 @@ class nnUNetTrainer(object):
 
     # 資料增強設定（由 MUTP recipe 控制，None=使用 nnU-Net 預設值）
     AUGMENTATION_CONFIG = None
+
+    # 模型額外建構參數（由 MUTP recipe.model.extra 透過 run_training 傳入）
+    # 會被 merge 進 get_network_from_plans 的 kwargs[UNet_class_name]
+    # 例：{"spade_alpha_init": 0.3}
+    MODEL_EXTRA_KWARGS = None
 
     # 梯度累積（batch_size 大時降低 data loader 壓力）
     # False ��� 每步都 optimizer.step()（預設行為）
@@ -541,8 +546,12 @@ class nnUNetTrainer(object):
         should be generated. label_manager takes care of all that for you.)
 
         """
+        # 從 class attr 讀額外建構參數（mutp 透過 MODEL_EXTRA_KWARGS class attr 傳）
+        # 例：S4/S5 的 spade_alpha_init=0.3
+        extra = getattr(nnUNetTrainer, 'MODEL_EXTRA_KWARGS', None)
         return get_network_from_plans(plans_manager, dataset_json, configuration_manager,
-                                      num_input_channels, deep_supervision=enable_deep_supervision)
+                                      num_input_channels, deep_supervision=enable_deep_supervision,
+                                      extra_kwargs=extra)
 
     def _get_deep_supervision_scales(self):
         deep_supervision_scales = list(list(i) for i in 1 / np.cumprod(np.vstack(
@@ -623,14 +632,29 @@ class nnUNetTrainer(object):
                                    channel_weights=channel_weights)
             print('Loss: DC_and_BCE_loss')
         else:
-            loss = DC_and_CE_loss({'batch_dice': self.configuration_manager.batch_dice,
-                                   'smooth': 1e-5, 'do_bg': False, 'ddp': self.is_ddp}, {}, weight_ce=1, weight_dice=1,
-                                  ignore_label=self.label_manager.ignore_label, dice_class=NewSoftDiceLoss)
-            print('nnUNet-long-BigBatch-cosine')
-            print('Loss: DC_and_CE_loss')
-            print('DC_and_CE_loss => NewDC_loss_and_CE_loss')   
-            print('combnine FEMH!!! and Large Big Batch Size 900!!!')   
-            print('batch_dice:', self.configuration_manager.batch_dice, 'ddp', self.is_ddp)      
+            # 從 recipe 讀 loss 設定（mutp 透過 LOSS_CONFIG class attr 傳）
+            # 形式：{name: 'Tversky_and_CE_loss', params: {alpha: 0.3, beta: 0.7}}
+            loss_cfg = getattr(self, 'LOSS_CONFIG', None) or {}
+            loss_name = loss_cfg.get('name', 'DC_and_CE_loss')
+            loss_params = loss_cfg.get('params', {}) or {}
+
+            if loss_name == 'Tversky_and_CE_loss':
+                alpha = float(loss_params.get('alpha', 0.3))  # FP 權重
+                beta = float(loss_params.get('beta', 0.7))    # FN 權重（大 → 找出小病灶）
+                loss = Tversky_and_CE_loss(
+                    {'batch_dice': self.configuration_manager.batch_dice,
+                     'smooth': 1e-5, 'do_bg': False, 'ddp': self.is_ddp,
+                     'alpha': alpha, 'beta': beta},
+                    {}, weight_ce=1, weight_tversky=1,
+                    ignore_label=self.label_manager.ignore_label,
+                )
+                print(f'Loss: Tversky_and_CE_loss (alpha={alpha} FP, beta={beta} FN)')
+            else:
+                loss = DC_and_CE_loss({'batch_dice': self.configuration_manager.batch_dice,
+                                       'smooth': 1e-5, 'do_bg': False, 'ddp': self.is_ddp}, {}, weight_ce=1, weight_dice=1,
+                                      ignore_label=self.label_manager.ignore_label, dice_class=NewSoftDiceLoss)
+                print('Loss: DC_and_CE_loss')
+            print('batch_dice:', self.configuration_manager.batch_dice, 'ddp', self.is_ddp)
             # loss = Log_DC_loss({'batch_dice': self.configuration_manager.batch_dice,
             #                        'smooth': 1e-5, 'do_bg': False, 'ddp': self.is_ddp}, weight_dice=1,
             #                       ignore_label=self.label_manager.ignore_label, dice_class=MemoryEfficientLogDiceLoss)  

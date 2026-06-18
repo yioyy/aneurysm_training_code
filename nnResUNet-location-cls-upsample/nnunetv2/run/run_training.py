@@ -109,6 +109,8 @@ def get_trainer_from_args(dataset_name_or_id: Union[int, str],
                           cls_foreground_labels: Optional[list] = None,
                           best_val_classes: Optional[list] = None,
                           augmentation_config: Optional[dict] = None,
+                          loss_config: Optional[dict] = None,
+                          model_extra_kwargs: Optional[dict] = None,
                           enable_gradient_accumulation: bool = False,
                           gradient_accumulation_steps: int = 1,
                           disable_builtin_mlflow: bool = False):
@@ -164,6 +166,16 @@ def get_trainer_from_args(dataset_name_or_id: Union[int, str],
         enabled = [k for k, v in augmentation_config.items() if v is True]
         disabled = [k for k, v in augmentation_config.items() if v is False]
         print(f'MUTP augmentation config: {len(enabled)} enabled, {len(disabled)} disabled')
+
+    # loss config（from MUTP recipe）— 支援 DC_and_CE_loss / Tversky_and_CE_loss
+    if loss_config is not None:
+        nnunet_trainer.LOSS_CONFIG = loss_config
+        print(f'MUTP loss config: {loss_config}')
+
+    # model extra kwargs（from MUTP recipe.model.extra）— 例：SPADE α 初值
+    if model_extra_kwargs:
+        nnunet_trainer.MODEL_EXTRA_KWARGS = dict(model_extra_kwargs)
+        print(f'MUTP model extra kwargs: {model_extra_kwargs}')
 
     # 梯度累積
     if enable_gradient_accumulation and gradient_accumulation_steps > 1:
@@ -280,6 +292,7 @@ def run_ddp(rank, dataset_name_or_id, configuration, fold, tr, p, use_compressed
                                            cls_foreground_labels=cls_foreground_labels,
                                            best_val_classes=best_val_classes,
                                            augmentation_config=augmentation_config,
+                                           loss_config=loss_config,
                                            enable_gradient_accumulation=enable_gradient_accumulation,
                                            gradient_accumulation_steps=gradient_accumulation_steps)
 
@@ -335,6 +348,8 @@ def run_training(dataset_name_or_id: Union[str, int],
                  cls_foreground_labels: Optional[list] = None,
                  best_val_classes: Optional[list] = None,
                  augmentation_config: Optional[dict] = None,
+                 loss_config: Optional[dict] = None,
+                 model_extra_kwargs: Optional[dict] = None,
                  enable_gradient_accumulation: bool = False,
                  gradient_accumulation_steps: int = 1,
                  disable_builtin_mlflow: bool = False,
@@ -421,6 +436,8 @@ def run_training(dataset_name_or_id: Union[str, int],
                                                cls_foreground_labels=cls_foreground_labels,
                                                best_val_classes=best_val_classes,
                                            augmentation_config=augmentation_config,
+                                           loss_config=loss_config,
+                                           model_extra_kwargs=model_extra_kwargs,
                                            enable_gradient_accumulation=enable_gradient_accumulation,
                                            gradient_accumulation_steps=gradient_accumulation_steps,
                                            disable_builtin_mlflow=disable_builtin_mlflow)

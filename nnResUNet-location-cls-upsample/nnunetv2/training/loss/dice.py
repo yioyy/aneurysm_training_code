@@ -316,6 +316,69 @@ def get_tp_fp_fn_tn(net_output, gt, axes=None, mask=None, square=False):
 
 
 #以下為自定義 Focal_Tversky_loss
+class TverskyLoss(nn.Module):
+    """Tversky Loss (Salehi et al. 2017)
+
+        Tversky = TP / (TP + α·FP + β·FN)
+        Loss = 1 - mean(Tversky over foreground classes)
+
+    α = β = 0.5 → 退化成 Dice loss
+    α < β（如 0.3, 0.7）→ FN 罰更重 → 鼓勵 model 不要漏（小 lesion 找出來）
+    α > β → FP 罰更重 → 鼓勵 model 不要亂報
+
+    對 infarct 小病灶：用 α=0.3, β=0.7 強化 sensitivity。
+    """
+
+    def __init__(self,
+                 apply_nonlin: Callable = None,
+                 alpha: float = 0.3,        # FP weight
+                 beta: float = 0.7,         # FN weight
+                 batch_dice: bool = False,
+                 do_bg: bool = False,       # 跟 DC_and_CE_loss 預設一致（不算 background）
+                 smooth: float = 1e-5,
+                 ddp: bool = True,
+                 clip_tp: float = None):
+        super().__init__()
+        self.do_bg = do_bg
+        self.batch_dice = batch_dice
+        self.apply_nonlin = apply_nonlin
+        self.alpha = alpha
+        self.beta = beta
+        self.smooth = smooth
+        self.clip_tp = clip_tp
+        self.ddp = ddp
+
+    def forward(self, x, y, loss_mask=None):
+        shp_x = x.shape
+        if self.batch_dice:
+            axes = [0] + list(range(2, len(shp_x)))
+        else:
+            axes = list(range(2, len(shp_x)))
+
+        if self.apply_nonlin is not None:
+            x = self.apply_nonlin(x)
+
+        tp, fp, fn, _ = get_tp_fp_fn_tn(x, y, axes, loss_mask, False)
+
+        if self.ddp and self.batch_dice:
+            tp = AllGatherGrad.apply(tp).sum(0)
+            fp = AllGatherGrad.apply(fp).sum(0)
+            fn = AllGatherGrad.apply(fn).sum(0)
+
+        if self.clip_tp is not None:
+            tp = torch.clip(tp, min=self.clip_tp, max=None)
+
+        tversky = (tp + self.smooth) / (tp + self.alpha * fp + self.beta * fn + self.smooth)
+
+        if not self.do_bg:
+            if self.batch_dice:
+                tversky = tversky[1:]
+            else:
+                tversky = tversky[:, 1:]
+
+        return -tversky.mean()
+
+
 class FocalTverskyLoss(nn.Module):
     def __init__(self, apply_nonlin: Callable = None, batch_dice: bool = False, do_bg: bool = True, smooth: float = 1.,
                  ddp: bool = True, clip_tp: float = None):
