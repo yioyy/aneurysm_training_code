@@ -102,7 +102,11 @@ class nnUNetLogger(object):
         sns.set(font_scale=2.5)
         # 判斷是否有 deep supervision logging 資料
         has_ds_logging = len(self.my_fantastic_logging.get('train_ce_losses', [])) > 0
-        num_plots = 2 + (3 if has_ds_logging else 0) + (1 if self.has_cls_head else 0)
+        # per-component loss keys（compound loss 才有，例如 train_loss_Tversky_and_CE_loss）
+        comp_keys = sorted({k.replace('train_loss_', '') for k in self.my_fantastic_logging
+                            if k.startswith('train_loss_') and len(self.my_fantastic_logging[k]) > 0})
+        has_loss_components = len(comp_keys) > 0
+        num_plots = 2 + (3 if has_ds_logging else 0) + (1 if self.has_cls_head else 0) + (1 if has_loss_components else 0)
         fig, ax_all = plt.subplots(num_plots, 1, figsize=(30, num_plots * 18))
         # regular progress.png as we are used to from previous nnU-Net versions
         ax = ax_all[0]
@@ -192,6 +196,26 @@ class nnUNetLogger(object):
             ax.legend(loc=(0, 1))
             plot_idx += 1
 
+        # === per-component loss panel（compound loss 才有；如 Tversky_and_CE_loss vs BoundaryLoss）===
+        if has_loss_components:
+            ax = ax_all[plot_idx]
+            comp_colors = ['b', 'orange', 'green', 'purple', 'brown', 'pink', 'gray']
+            for i, ck in enumerate(comp_keys):
+                c = comp_colors[i % len(comp_colors)]
+                tr_key = f'train_loss_{ck}'
+                val_key = f'val_loss_{ck}'
+                if tr_key in self.my_fantastic_logging and len(self.my_fantastic_logging[tr_key]) > 0:
+                    ax.plot(x_values, self.my_fantastic_logging[tr_key][:epoch + 1],
+                            color=c, ls='-', label=f"train {ck}", linewidth=4)
+                if val_key in self.my_fantastic_logging and len(self.my_fantastic_logging[val_key]) > 0:
+                    ax.plot(x_values, self.my_fantastic_logging[val_key][:epoch + 1],
+                            color=c, ls='--', label=f"val {ck}", linewidth=4)
+            ax.set_xlabel("epoch")
+            ax.set_ylabel("loss (weighted)")
+            ax.set_title("Per-component loss (weighted contribution to total)", fontsize=20)
+            ax.legend(loc=(0, 1))
+            plot_idx += 1
+
         # learning rate
         ax = ax_all[plot_idx]
         ax.plot(x_values, self.my_fantastic_logging['lrs'][:epoch + 1], color='b', ls='-', label="learning rate", linewidth=4)
@@ -199,7 +223,13 @@ class nnUNetLogger(object):
         ax.set_ylabel("learning rate")
         ax.legend(loc=(0, 1))
 
-        plt.tight_layout()
+        # Loss config 大字 suptitle（從 trainer 傳進來的 loss_str）
+        loss_str = getattr(self, "loss_str", None)
+        if loss_str:
+            fig.suptitle(f"Loss: {loss_str}", fontsize=28, y=0.998)
+            plt.tight_layout(rect=[0, 0, 1, 0.985])
+        else:
+            plt.tight_layout()
 
         fig.savefig(join(output_folder, "progress.png"))
         plt.close()

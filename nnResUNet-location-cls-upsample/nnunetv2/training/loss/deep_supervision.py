@@ -25,11 +25,23 @@ class DeepSupervisionWrapper(nn.Module):
         else:
             weights = self.weight_factors
 
+        # 給 per-component logging 用：如果內層 loss 是 Compound_loss，會在每次 call 後
+        # 寫進 self.loss.last_components；我們把各 scale 的值依 deep-supervision weight 加總起來
+        self.last_components = None
+
         # we initialize the loss like this instead of 0 to ensure it sits on the correct device, not sure if that's
         # really necessary
         l = weights[0] * self.loss(*[j[0] for j in args])
+        # 抓取 scale 0 的 per-component 值
+        inner_lc = getattr(self.loss, 'last_components', None)
+        if inner_lc:
+            self.last_components = {n: weights[0] * v for n, v in inner_lc.items()}
         for i, inputs in enumerate(zip(*args)):
             if i == 0:
                 continue
             l += weights[i] * self.loss(*inputs)
+            inner_lc = getattr(self.loss, 'last_components', None)
+            if inner_lc and self.last_components is not None:
+                for n, v in inner_lc.items():
+                    self.last_components[n] = self.last_components.get(n, 0.0) + weights[i] * v
         return l

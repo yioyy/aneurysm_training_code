@@ -1,6 +1,7 @@
 import torch
 from nnunetv2.training.loss.dice import SoftDiceLoss, MemoryEfficientSoftDiceLoss, MemoryEfficientNewSoftDiceLoss, FocalTverskyLoss, MemoryEfficientLogDiceLoss, NewSoftDiceLoss, TverskyLoss
 from nnunetv2.training.loss.robust_ce_loss import RobustCrossEntropyLoss, TopKLoss
+from nnunetv2.training.loss.boundary_loss import BoundaryLoss
 from nnunetv2.utilities.helpers import softmax_helper_dim1
 from torch import nn
 
@@ -53,6 +54,14 @@ class DC_and_CE_loss(nn.Module):
         ce_loss = self.ce(net_output, target[:, 0].long()) \
             if self.weight_ce != 0 and (self.ignore_label is None or num_fg > 0) else 0
 
+        # 記錄 inner component（給 Compound_loss 遞迴展開用）
+        def _f(v):
+            try: return float(v.detach()) if hasattr(v, 'detach') else float(v)
+            except Exception: return float('nan')
+        self.last_components = {
+            'CE':   self.weight_ce * _f(ce_loss),
+            'Dice': self.weight_dice * _f(dc_loss),
+        }
         result = self.weight_ce * ce_loss + self.weight_dice * dc_loss
         return result
 
@@ -94,6 +103,14 @@ class Tversky_and_CE_loss(nn.Module):
         tv_loss = self.tv(net_output, target_dice, loss_mask=mask) if self.weight_tversky != 0 else 0
         ce_loss = self.ce(net_output, target[:, 0].long()) \
             if self.weight_ce != 0 and (self.ignore_label is None or num_fg > 0) else 0
+        # 記錄 inner component（給 Compound_loss 遞迴展開用）
+        def _f(v):
+            try: return float(v.detach()) if hasattr(v, 'detach') else float(v)
+            except Exception: return float('nan')
+        self.last_components = {
+            'CE':      self.weight_ce * _f(ce_loss),
+            'Tversky': self.weight_tversky * _f(tv_loss),
+        }
         return self.weight_ce * ce_loss + self.weight_tversky * tv_loss
 
 
@@ -156,6 +173,14 @@ class DC_and_BCE_loss(nn.Module):
             else:
                 ce_loss = self.ce(net_output, target_regions)
 
+        # 記錄 inner component（給 Compound_loss 遞迴展開用）
+        def _f(v):
+            try: return float(v.detach()) if hasattr(v, 'detach') else float(v)
+            except Exception: return float('nan')
+        self.last_components = {
+            'BCE':  self.weight_ce * _f(ce_loss),
+            'Dice': self.weight_dice * _f(dc_loss),
+        }
         result = self.weight_ce * ce_loss + self.weight_dice * dc_loss
         return result
 
@@ -422,3 +447,48 @@ class NewDC_loss_and_CE_loss(nn.Module):
 
         result = self.weight_ce * ce_loss + self.weight_dice * dc_loss
         return result
+
+class Compound_loss(nn.Module):
+    """通用複合 loss：sum_i (weight_i * loss_i(net_output, target))
+
+    讓 MUTP recipe 的 loss.components: [{name, weight, params}, ...] 自動組成複合 loss。
+    各 sub-loss 都要接受 (net_output, target) 簽名（跟 deep supervision wrapper 對齊）。
+
+    Args:
+        losses: list[nn.Module]，已建構好的 loss 物件
+        weights: list[float]，跟 losses 對齊的權重
+        names: list[str] (optional)，記錄用
+    """
+    def __init__(self, losses, weights, names=None):
+        super().__init__()
+        assert len(losses) == len(weights), "losses/weights 數量不一致"
+        self.losses = nn.ModuleList(losses)
+        self.weights = list(weights)
+        self.names = list(names) if names else [type(l).__name__ for l in losses]
+
+    def forward(self, net_output: torch.Tensor, target: torch.Tensor):
+        total = net_output.new_tensor(0.0)
+        # 記錄每個 component 的加權值（給 trainer / logger 用，detach 避免影響 backward）
+        # 遞迴展開：若 inner loss 自己也有 last_components（如 Tversky_and_CE_loss 內部
+        # 拆 CE / Tversky），則展開 inner，每個 inner 值再 × 外層 weight
+        self.last_components = {}
+        for n, w, loss in zip(self.names, self.weights, self.losses):
+            v = loss(net_output, target)
+            wv = w * v
+            total = total + wv
+            inner = getattr(loss, 'last_components', None)
+            if inner:
+                # 展開 inner，scale by outer weight
+                for inner_n, inner_v in inner.items():
+                    # 同名 key 累加（避免衝突；通常不會發生）
+                    self.last_components[inner_n] = self.last_components.get(inner_n, 0.0) + w * inner_v
+            else:
+                # 沒 inner breakdown → 用 outer 名稱當 key
+                try:
+                    self.last_components[n] = float(wv.detach())
+                except Exception:
+                    self.last_components[n] = float('nan')
+        return total
+
+    def extra_repr(self) -> str:
+        return ", ".join(f"{n}*{w}" for n, w in zip(self.names, self.weights))

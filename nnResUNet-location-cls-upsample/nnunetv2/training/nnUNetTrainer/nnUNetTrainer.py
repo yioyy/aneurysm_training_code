@@ -172,7 +172,8 @@ from nnunetv2.training.dataloading.data_loader_3d import nnUNetDataLoader3D
 from nnunetv2.training.dataloading.nnunet_dataset import nnUNetDataset
 from nnunetv2.training.dataloading.utils import get_case_identifiers, unpack_dataset, build_sampling_probabilities
 from nnunetv2.training.logging.nnunet_logger import nnUNetLogger
-from nnunetv2.training.loss.compound_losses import DC_and_CE_loss, DC_and_BCE_loss, Log_DC_loss, CE_loss, DC_loss, Tversky_and_CE_loss
+from nnunetv2.training.loss.compound_losses import DC_and_CE_loss, DC_and_BCE_loss, Log_DC_loss, CE_loss, DC_loss, Tversky_and_CE_loss, Compound_loss
+from nnunetv2.training.loss.boundary_loss import BoundaryLoss
 from nnunetv2.training.loss.deep_supervision import DeepSupervisionWrapper
 from nnunetv2.training.loss.dice import get_tp_fp_fn_tn, MemoryEfficientSoftDiceLoss, MemoryEfficientLogDiceLoss, MemoryEfficientNewSoftDiceLoss, NewSoftDiceLoss
 from nnunetv2.training.lr_scheduler.polylr import PolyLRScheduler
@@ -460,6 +461,15 @@ class nnUNetTrainer(object):
             
             # Reinitialize logger with correct number of deep supervision levels and cls head flag
             self.logger = nnUNetLogger(verbose=self.logger.verbose, num_deep_supervision_levels=self.num_deep_supervision_levels, has_cls_head=self.has_cls_head)
+            # 把 loss 描述傳給 logger，給 progress.png suptitle 用
+            self.logger.loss_str = getattr(self, 'loss_str', None)
+
+            # 大字 banner 印 loss 組合（log + console），方便回頭翻 log 一眼看出實驗
+            if getattr(self, 'loss_str', None):
+                _banner = "=" * 70
+                self.print_to_log_file(_banner, also_print_to_console=True)
+                self.print_to_log_file(f"  Loss config: {self.loss_str}", also_print_to_console=True)
+                self.print_to_log_file(_banner, also_print_to_console=True)
             
             # EMA model：建立一份 network 的深拷貝作為 EMA 參數副本
             if self.ENABLE_EMA:
@@ -630,30 +640,76 @@ class nnUNetTrainer(object):
                                    use_ignore_label=self.label_manager.ignore_label is not None,
                                    dice_class=MemoryEfficientNewSoftDiceLoss,
                                    channel_weights=channel_weights)
+            self.loss_str = "DC+BCE"
             print('Loss: DC_and_BCE_loss')
         else:
             # 從 recipe 讀 loss 設定（mutp 透過 LOSS_CONFIG class attr 傳）
-            # 形式：{name: 'Tversky_and_CE_loss', params: {alpha: 0.3, beta: 0.7}}
+            # 兩種格式都接受：
+            #   舊：{name: 'Tversky_and_CE_loss', params: {...}}                 (單 loss)
+            #   新：{components: [{name, weight, params}, {name, weight, params}, ...]}  (複合)
             loss_cfg = getattr(self, 'LOSS_CONFIG', None) or {}
-            loss_name = loss_cfg.get('name', 'DC_and_CE_loss')
-            loss_params = loss_cfg.get('params', {}) or {}
+            components = loss_cfg.get('components', None)
+            if components is None:
+                # 舊格式 → 包成 1-element components
+                single_name = loss_cfg.get('name', 'DC_and_CE_loss')
+                single_params = loss_cfg.get('params', {}) or {}
+                components = [{'name': single_name, 'weight': 1.0, 'params': single_params}]
 
-            if loss_name == 'Tversky_and_CE_loss':
-                alpha = float(loss_params.get('alpha', 0.3))  # FP 權重
-                beta = float(loss_params.get('beta', 0.7))    # FN 權重（大 → 找出小病灶）
-                loss = Tversky_and_CE_loss(
-                    {'batch_dice': self.configuration_manager.batch_dice,
-                     'smooth': 1e-5, 'do_bg': False, 'ddp': self.is_ddp,
-                     'alpha': alpha, 'beta': beta},
-                    {}, weight_ce=1, weight_tversky=1,
-                    ignore_label=self.label_manager.ignore_label,
-                )
-                print(f'Loss: Tversky_and_CE_loss (alpha={alpha} FP, beta={beta} FN)')
+            built = []
+            built_weights = []
+            built_names = []
+            short_names = []   # 給 log / CSV / progress.png 用的緊湊描述
+            for comp in components:
+                cname = comp.get('name', 'DC_and_CE_loss')
+                cweight = float(comp.get('weight', 1.0))
+                cparams = comp.get('params', {}) or {}
+                if cname == 'Tversky_and_CE_loss':
+                    alpha = float(cparams.get('alpha', 0.3))
+                    beta = float(cparams.get('beta', 0.7))
+                    sub_loss = Tversky_and_CE_loss(
+                        {'batch_dice': self.configuration_manager.batch_dice,
+                         'smooth': 1e-5, 'do_bg': False, 'ddp': self.is_ddp,
+                         'alpha': alpha, 'beta': beta},
+                        {}, weight_ce=1, weight_tversky=1,
+                        ignore_label=self.label_manager.ignore_label,
+                    )
+                    print(f'  + {cname} weight={cweight} (alpha={alpha} FP, beta={beta} FN)')
+                    short_names.append(f"T(α{alpha},β{beta})+CE" if cweight == 1.0 else f"{cweight}*T(α{alpha},β{beta})+CE")
+                elif cname == 'BoundaryLoss':
+                    idc = cparams.get('idc', [1])
+                    engine = cparams.get('engine', 'torch')
+                    max_dist = int(cparams.get('max_dist', 10))
+                    normalize = bool(cparams.get('normalize', True))
+                    spacing = cparams.get('spacing', None)
+                    if spacing is not None:
+                        spacing = tuple(spacing)
+                    sub_loss = BoundaryLoss(idc=idc, engine=engine, max_dist=max_dist,
+                                            normalize=normalize, spacing=spacing)
+                    print(f'  + {cname} weight={cweight} (engine={engine}, max_dist={max_dist}, idc={idc})')
+                    short_names.append(f"{cweight}*B" if cweight != 1.0 else "B")
+                else:
+                    # default DC_and_CE_loss
+                    sub_loss = DC_and_CE_loss({'batch_dice': self.configuration_manager.batch_dice,
+                                               'smooth': 1e-5, 'do_bg': False, 'ddp': self.is_ddp},
+                                              {}, weight_ce=1, weight_dice=1,
+                                              ignore_label=self.label_manager.ignore_label,
+                                              dice_class=NewSoftDiceLoss)
+                    print(f'  + DC_and_CE_loss weight={cweight}')
+                    short_names.append("DC+CE" if cweight == 1.0 else f"{cweight}*(DC+CE)")
+                built.append(sub_loss)
+                built_weights.append(cweight)
+                built_names.append(cname)
+
+            # 短描述字串：給 log / CSV / progress.png suptitle 用
+            self.loss_str = " + ".join(short_names)
+
+            if len(built) == 1:
+                loss = built[0]
+                print(f'Loss: single ({built_names[0]}) → {self.loss_str}')
             else:
-                loss = DC_and_CE_loss({'batch_dice': self.configuration_manager.batch_dice,
-                                       'smooth': 1e-5, 'do_bg': False, 'ddp': self.is_ddp}, {}, weight_ce=1, weight_dice=1,
-                                      ignore_label=self.label_manager.ignore_label, dice_class=NewSoftDiceLoss)
-                print('Loss: DC_and_CE_loss')
+                loss = Compound_loss(built, built_weights, built_names)
+                print(f'Loss: Compound  [{" + ".join(f"{n}*{w}" for n, w in zip(built_names, built_weights))}]')
+                print(f'Loss str: {self.loss_str}')
             print('batch_dice:', self.configuration_manager.batch_dice, 'ddp', self.is_ddp)
             # loss = Log_DC_loss({'batch_dice': self.configuration_manager.batch_dice,
             #                        'smooth': 1e-5, 'do_bg': False, 'ddp': self.is_ddp}, weight_dice=1,
@@ -1786,6 +1842,10 @@ class nnUNetTrainer(object):
             'fn_hard': fn_hard.cpu().numpy(),
             'dc0': dc0_val.cpu().numpy(),
         }
+        # 把每個 loss component 的數值放進 result（compound loss 才有）
+        _lc = getattr(self.loss, 'last_components', None)
+        if _lc:
+            result['loss_components'] = dict(_lc)
 
         if self.enable_deep_supervision_logging:
             result['ce_loss'] = ce_l.detach().cpu().numpy()
@@ -1917,6 +1977,17 @@ class nnUNetTrainer(object):
         self.logger.log('train_mean_fg_dice', mean_fg_dice, self.current_epoch)
         self.logger.log('train_dice_per_class_or_region', global_dc_per_class, self.current_epoch)
 
+        # === per-component loss 加總平均（compound loss 才有）===
+        if 'loss_components' in outputs and outputs['loss_components']:
+            comp_dicts = outputs['loss_components']   # list of dict
+            comp_keys = comp_dicts[0].keys() if comp_dicts else []
+            for k in comp_keys:
+                vals = [d.get(k, float('nan')) for d in comp_dicts]
+                key_name = f'train_loss_{k}'
+                if key_name not in self.logger.my_fantastic_logging:
+                    self.logger.my_fantastic_logging[key_name] = list()
+                self.logger.log(key_name, float(np.nanmean(vals)), self.current_epoch)
+
         if self.enable_deep_supervision_logging:
             self.logger.log('train_ce_losses', ce_loss_here, self.current_epoch)
             self.logger.log('train_dice_losses', dice_loss_here, self.current_epoch)
@@ -2045,6 +2116,10 @@ class nnUNetTrainer(object):
             'fn_hard': fn_hard.cpu().numpy(),
             'dc0': dc0_val.cpu().numpy(),
         }
+        # 把每個 loss component 的數值放進 result（compound loss 才有）
+        _lc = getattr(self.loss, 'last_components', None)
+        if _lc:
+            result['loss_components'] = dict(_lc)
 
         if self.enable_deep_supervision_logging:
             result['ce_loss'] = ce_l.detach().cpu().numpy()
@@ -2172,6 +2247,17 @@ class nnUNetTrainer(object):
         self.logger.log('val_losses', loss_here, self.current_epoch)
         self.logger.log('val_seg_losses', seg_loss_here, self.current_epoch)
 
+        # === per-component validation loss（compound loss 才有）===
+        if 'loss_components' in outputs_collated and outputs_collated['loss_components']:
+            comp_dicts = outputs_collated['loss_components']
+            comp_keys = comp_dicts[0].keys() if comp_dicts else []
+            for k in comp_keys:
+                vals = [d.get(k, float('nan')) for d in comp_dicts]
+                key_name = f'val_loss_{k}'
+                if key_name not in self.logger.my_fantastic_logging:
+                    self.logger.my_fantastic_logging[key_name] = list()
+                self.logger.log(key_name, float(np.nanmean(vals)), self.current_epoch)
+
         if self.enable_deep_supervision_logging:
             self.logger.log('val_ce_losses', ce_loss_here, self.current_epoch)
             self.logger.log('val_dice_losses', dice_loss_here, self.current_epoch)
@@ -2233,6 +2319,11 @@ class nnUNetTrainer(object):
         _log_print('train_losses', 'train_loss')
         _log_print('train_seg_losses', 'train_seg_loss')
 
+        # 印出 per-component train loss（compound loss 才有，如 CE / Tversky / Boundary）
+        for _comp_key in sorted(self.logger.my_fantastic_logging.keys()):
+            if _comp_key.startswith('train_loss_') and len(self.logger.my_fantastic_logging[_comp_key]) > 0:
+                _log_print(_comp_key, _comp_key)   # label 跟 key 一樣，如 'train_loss_CE'
+
         if self.enable_deep_supervision_logging:
             _log_print('train_ce_losses', 'train_ce_loss')
             _log_print('train_dice_losses', 'train_dice_loss')
@@ -2248,6 +2339,11 @@ class nnUNetTrainer(object):
 
         _log_print('val_losses', 'val_loss')
         _log_print('val_seg_losses', 'val_seg_loss')
+
+        # 印出 per-component val loss（compound loss 才有）
+        for _comp_key in sorted(self.logger.my_fantastic_logging.keys()):
+            if _comp_key.startswith('val_loss_') and len(self.logger.my_fantastic_logging[_comp_key]) > 0:
+                _log_print(_comp_key, _comp_key)
 
         if self.enable_deep_supervision_logging:
             _log_print('val_ce_losses', 'val_ce_loss')
@@ -2435,6 +2531,7 @@ class nnUNetTrainer(object):
 
         row = {
             'epoch': int(self.current_epoch),
+            'loss_config': getattr(self, 'loss_str', '') or '',
             'lr': _last_scalar('lrs'),
             'train_loss': _last_scalar('train_losses'),
             'train_seg_loss': _last_scalar('train_seg_losses'),
@@ -2447,6 +2544,10 @@ class nnUNetTrainer(object):
             'epoch_time_s': epoch_time_s,
             'new_best_ema': float(new_best_ema) if new_best_ema is not None else float('nan'),
         }
+        # per-component loss 數值（compound loss 才有，例如 train_loss_Tversky_and_CE_loss）
+        for k in log.keys():
+            if k.startswith('train_loss_') or k.startswith('val_loss_'):
+                row[k] = _last_scalar(k)
 
         # 每個前景類別獨立的 dice 欄位（multi-class 分析用，class 數量由 dataset 決定）
         for i, d in enumerate(_last_list('train_dice_per_class_or_region')):

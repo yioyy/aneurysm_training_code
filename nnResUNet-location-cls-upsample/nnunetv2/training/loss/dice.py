@@ -376,26 +376,47 @@ class TverskyLoss(nn.Module):
             else:
                 tversky = tversky[:, 1:]
 
-        return -tversky.mean()
+        # 跟 NewSoftDiceLoss 對齊（也是 1-dc 慣例）→ loss ∈ [0, 1]，正向 minimize
+        # 訓練梯度跟 -tversky 完全等價（只差常數 1），但 log/plot 數字直覺多
+        return 1 - tversky.mean()
 
 
 class FocalTverskyLoss(nn.Module):
-    def __init__(self, apply_nonlin: Callable = None, batch_dice: bool = False, do_bg: bool = True, smooth: float = 1.,
-                 ddp: bool = True, clip_tp: float = None):
-        """
-        """
-        super(SoftDiceLoss, self).__init__()
+    """Focal Tversky Loss (Abraham & Khan 2018, ISBI)
 
+        Tversky = TP / (TP + α·FP + β·FN)
+        Loss = (1 - mean(Tversky)) ** γ
+
+    γ > 1：把已經 easy 的 region 壓平、focus 在難分割的（hard examples）
+    γ = 1：退化成 Tversky loss
+    α = β = 0.5, γ = 1 → 退化成 Dice loss
+
+    對小且難分病灶（infarct / aneurysm）特別有效。
+    """
+
+    def __init__(self,
+                 apply_nonlin: Callable = None,
+                 alpha: float = 0.3,        # FP weight (跟 TverskyLoss 對齊)
+                 beta: float = 0.7,         # FN weight
+                 gamma: float = 4.0 / 3.0,  # focal exponent (Abraham 建議 4/3)
+                 batch_dice: bool = False,
+                 do_bg: bool = False,       # 跟 TverskyLoss 對齊
+                 smooth: float = 1e-5,
+                 ddp: bool = True,
+                 clip_tp: float = None):
+        super().__init__()
         self.do_bg = do_bg
         self.batch_dice = batch_dice
         self.apply_nonlin = apply_nonlin
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
         self.smooth = smooth
         self.clip_tp = clip_tp
         self.ddp = ddp
 
     def forward(self, x, y, loss_mask=None):
         shp_x = x.shape
-
         if self.batch_dice:
             axes = [0] + list(range(2, len(shp_x)))
         else:
@@ -412,14 +433,10 @@ class FocalTverskyLoss(nn.Module):
             fn = AllGatherGrad.apply(fn).sum(0)
 
         if self.clip_tp is not None:
-            tp = torch.clip(tp, min=self.clip_tp , max=None)
+            tp = torch.clip(tp, min=self.clip_tp, max=None)
 
-
-        #Focal_Tversky_loss以下根據修改
-        alpha = 0.7
-        smooth = 1e-7
-        gamma = 0.75
-        tversky = (tp + smooth)/(tp + alpha*fn + (1-alpha)*fn + smooth)
+        # Tversky 同 TverskyLoss
+        tversky = (tp + self.smooth) / (tp + self.alpha * fp + self.beta * fn + self.smooth)
 
         if not self.do_bg:
             if self.batch_dice:
@@ -427,10 +444,9 @@ class FocalTverskyLoss(nn.Module):
             else:
                 tversky = tversky[:, 1:]
 
-        tversky = tversky.mean()
-        
-        return (1 - tversky) ^ gamma
-         
+        # Focal：(1 - tversky) ** γ ∈ [0, 1]，跟 TverskyLoss / NewSoftDiceLoss 對齊
+        return ((1 - tversky.mean()).clamp(min=1e-7)) ** self.gamma
+
 
 class MemoryEfficientLogDiceLoss(nn.Module):
     def __init__(self, apply_nonlin: Callable = None, batch_dice: bool = False, do_bg: bool = True, smooth: float = 1.,
