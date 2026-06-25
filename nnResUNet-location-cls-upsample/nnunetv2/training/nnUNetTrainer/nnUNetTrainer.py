@@ -336,6 +336,13 @@ class nnUNetTrainer(object):
                  self.__class__.__name__ + '__' + self.plans_manager.plans_name + "__" +
                  self.configuration_manager.previous_stage_name, 'predicted_next_stage', self.configuration_name) \
                 if self.is_cascaded else None
+        # Dual-head multi-task: 把 aux seg 資料夾餵進 seg_from_prev_stage 機制，
+        # 讓 nnUNetDataset 自動把 aux seg 疊成 2nd channel。
+        # 由 mutp 在啟動訓練前 export MUTP_AUX_SEG_FOLDER=...
+        _aux_folder = os.environ.get("MUTP_AUX_SEG_FOLDER")
+        if _aux_folder and not self.is_cascaded:
+            self.folder_with_segs_from_previous_stage = _aux_folder
+            print(f"[MUTP] dual-head aux seg folder: {_aux_folder}")
 
         ### Some hyperparameters for you to fiddle with
         self.initial_lr = initial_lr
@@ -419,6 +426,12 @@ class nnUNetTrainer(object):
         'ResidualEncoderUNetGuidedClassifier', 'ResidualEncoderUNetGuidedClassifier2D',
     }
 
+    # 雙 seg head 模型名稱集合 — multi-task: main = infarct, aux = SynthSeg region
+    # Forward 回傳 (main_logits, aux_logits) tuple；target 必須是 2-channel seg
+    _DUAL_SEG_HEAD_NAMES = {
+        'ResidualEncoderUNet_DualSegHead',
+    }
+
     def initialize(self):
         if not self.was_initialized:
             self.num_input_channels = determine_num_input_channels(self.plans_manager, self.configuration_manager,
@@ -433,6 +446,15 @@ class nnUNetTrainer(object):
             self.has_cls_head = self.configuration_manager.UNet_class_name in self._CLS_NETWORK_NAMES
             self.print_to_log_file(f'has_cls_head: {self.has_cls_head} (UNet_class_name: {self.configuration_manager.UNet_class_name})')
 
+            # 自動偵測是否有雙 seg head (multi-task: main = infarct, aux = SynthSeg region)
+            # Dual-head model forward 回傳 (main, aux) tuple；target 必須是 2-channel (infarct + region)
+            self.has_aux_seg_head = self.configuration_manager.UNet_class_name in self._DUAL_SEG_HEAD_NAMES
+            self.aux_loss_weight = getattr(self, "AUX_LOSS_WEIGHT", 1.0)
+            self.print_to_log_file(
+                f'has_aux_seg_head: {self.has_aux_seg_head}'
+                + (f' (aux_loss_weight={self.aux_loss_weight})' if self.has_aux_seg_head else '')
+            )
+
             self.optimizer, self.lr_scheduler = self.configure_optimizers()
             # if ddp, wrap in DDP wrapper
             if self.is_ddp:
@@ -442,6 +464,10 @@ class nnUNetTrainer(object):
             self.loss = self._build_loss()
             if self.has_cls_head:
                 self.cls_loss = self._build_cls_loss()
+            if self.has_aux_seg_head:
+                # aux head 用同一個 loss class，但 num_classes 不同 → 直接重用 _build_loss 即可
+                # (DC_and_CE_loss 是 generic for any num_classes)
+                self.aux_loss = self._build_loss()
 
             self.num_deep_supervision_levels = len(self._get_deep_supervision_scales())
             self.enable_deep_supervision_logging = getattr(self, "ENABLE_DEEP_SUPERVISION_LOGGING", False)
@@ -1734,14 +1760,32 @@ class nnUNetTrainer(object):
         with autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
             if self.has_cls_head:
                 output_seg, output_cls = self.network(data)
+            elif self.has_aux_seg_head:
+                # Dual-head: network 回傳 (main_logits, aux_logits)
+                # target 必須是 2-channel (infarct + region)，由 seg_from_prev_stage 機制疊起
+                output_seg, output_aux = self.network(data)
+                # split target → main_target (infarct, ch0), aux_target (region, ch1)
+                if isinstance(target, list):
+                    target_main = [t[:, 0:1] for t in target]
+                    target_aux  = [t[:, 1:2] for t in target]
+                else:
+                    target_main = target[:, 0:1]
+                    target_aux  = target[:, 1:2]
             else:
                 output_seg = self.network(data)
 
-            seg_l = self.loss(output_seg, target)
+            if self.has_aux_seg_head:
+                # output_seg = main → loss_main 對 infarct；output_aux → loss_aux 對 region
+                seg_l = self.loss(output_seg, target_main)
+                aux_l = self.aux_loss(output_aux, target_aux)
+            else:
+                seg_l = self.loss(output_seg, target)
 
             if self.has_cls_head:
                 cls_l = self.cls_loss(output_cls, positive.squeeze(1).long())
                 l = seg_l + cls_l
+            elif self.has_aux_seg_head:
+                l = seg_l + self.aux_loss_weight * aux_l
             else:
                 l = seg_l
 
@@ -1751,11 +1795,12 @@ class nnUNetTrainer(object):
 
             # 額外 loss 分項 + 每層 dice（僅 deep supervision logging 開啟時）
             if self.enable_deep_supervision_logging:
-                ce_l = self.ce_loss(output_seg, target)
-                dice_l = self.dice_loss(output_seg, target)
+                _ds_target = target_main if self.has_aux_seg_head else target
+                ce_l = self.ce_loss(output_seg, _ds_target)
+                dice_l = self.dice_loss(output_seg, _ds_target)
                 individual_dice_losses = {}
                 for i in range(self.num_deep_supervision_levels):
-                    individual_dice_losses[f'dice_l{i}'] = self.individual_dice_losses[f'dice_loss{i}'](output_seg, target)
+                    individual_dice_losses[f'dice_l{i}'] = self.individual_dice_losses[f'dice_loss{i}'](output_seg, _ds_target)
 
         if self.grad_scaler is not None:
             self.grad_scaler.scale(l).backward()
@@ -2028,24 +2073,39 @@ class nnUNetTrainer(object):
         with autocast(self.device.type, enabled=True) if self.device.type == 'cuda' else dummy_context():
             if self.has_cls_head:
                 output_seg, output_cls = self.network(data)
+            elif self.has_aux_seg_head:
+                output_seg, output_aux = self.network(data)
+                if isinstance(target, list):
+                    target_main = [t[:, 0:1] for t in target]
+                    target_aux  = [t[:, 1:2] for t in target]
+                else:
+                    target_main = target[:, 0:1]
+                    target_aux  = target[:, 1:2]
             else:
                 output_seg = self.network(data)
             del data
 
-            seg_l = self.loss(output_seg, target)
+            if self.has_aux_seg_head:
+                seg_l = self.loss(output_seg, target_main)
+                aux_l = self.aux_loss(output_aux, target_aux)
+            else:
+                seg_l = self.loss(output_seg, target)
 
             if self.has_cls_head:
                 cls_l = self.cls_loss(output_cls, positive.squeeze(1).long())
                 l = seg_l + cls_l
+            elif self.has_aux_seg_head:
+                l = seg_l + self.aux_loss_weight * aux_l
             else:
                 l = seg_l
 
             if self.enable_deep_supervision_logging:
-                ce_l = self.ce_loss(output_seg, target)
-                dice_l = self.dice_loss(output_seg, target)
+                _ds_target = target_main if self.has_aux_seg_head else target
+                ce_l = self.ce_loss(output_seg, _ds_target)
+                dice_l = self.dice_loss(output_seg, _ds_target)
                 individual_dice_losses = {}
                 for i in range(self.num_deep_supervision_levels):
-                    individual_dice_losses[f'dice_l{i}'] = self.individual_dice_losses[f'dice_loss{i}'](output_seg, target)
+                    individual_dice_losses[f'dice_l{i}'] = self.individual_dice_losses[f'dice_loss{i}'](output_seg, _ds_target)
 
         # classification metrics (only when has_cls_head)
         if self.has_cls_head:
@@ -2061,9 +2121,9 @@ class nnUNetTrainer(object):
             sensitivity = TP / (TP + FN + 1e-8)
             specificity = TN / (TN + FP + 1e-8)
 
-        # ---- Pseudo dice metrics（只算 i==0 最高解析度）----
+        # ---- Pseudo dice metrics（只算 i==0 最高解析度；dual-head 只算 infarct 主 head）----
         output0 = output_seg[0]
-        target0 = target[0]
+        target0 = (target_main if self.has_aux_seg_head else target)[0]
         axes = [0] + list(range(2, len(output0.shape)))
         axes0 = list(range(2, len(output0.shape)))
 

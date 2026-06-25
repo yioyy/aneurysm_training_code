@@ -537,6 +537,114 @@ class ResidualEncoderUNet_SPADEFull(ResidualEncoderUNet_SPADE):
         super().__init__(*args, **kwargs)
 
 
+# ============================================================
+# Dual-Seg-Head：joint multi-task (主 head infarct + 輔 head SynthSeg region)
+# ============================================================
+
+class ResidualEncoderUNet_DualSegHead(nn.Module):
+    """雙 segmentation head — 共用 encoder + decoder，最後接兩個獨立 head。
+
+    主 head: infarct 分割（num_classes 個 class，通常 2 = bg/infarct）
+    輔 head: SynthSeg region 分割（num_classes_aux 個 class，通常 11 = bg + 10 regions）
+
+    Forward 回傳 tuple (main_logits, aux_logits)：
+      - deep_supervision=False: (main, aux)，各 shape [B, C, ...]
+      - deep_supervision=True : (main_list, aux_list)，各為 list of [B, C_i, ...]
+
+    Loss 由 trainer 算：L = L_main(main, gt_main) + λ * L_aux(aux, gt_aux)。
+    Inference 時用 main head 結果評估 infarct（同 baseline）。
+    """
+
+    def __init__(
+        self,
+        input_channels: int,
+        n_stages: int,
+        features_per_stage: Union[int, List[int], Tuple[int, ...]],
+        conv_op: Type[_ConvNd],
+        kernel_sizes: Union[int, List[int], Tuple[int, ...]],
+        strides: Union[int, List[int], Tuple[int, ...]],
+        n_blocks_per_stage: Union[int, List[int], Tuple[int, ...]],
+        num_classes: int,
+        n_conv_per_stage_decoder: Union[int, Tuple[int, ...], List[int]],
+        conv_bias: bool = False,
+        norm_op: Union[None, Type[nn.Module]] = None,
+        norm_op_kwargs: dict = None,
+        dropout_op: Union[None, Type[_DropoutNd]] = None,
+        dropout_op_kwargs: dict = None,
+        nonlin: Union[None, Type[torch.nn.Module]] = None,
+        nonlin_kwargs: dict = None,
+        deep_supervision: bool = False,
+        block: Union[Type[BasicBlockD], Type[BottleneckD]] = BasicBlockD,
+        bottleneck_channels: Union[int, List[int], Tuple[int, ...]] = None,
+        stem_channels: int = None,
+        num_classes_aux: int = 11,
+    ):
+        super().__init__()
+        if isinstance(features_per_stage, int):
+            features_per_stage = [features_per_stage] * n_stages
+        features_per_stage = list(features_per_stage)
+        if isinstance(n_blocks_per_stage, int):
+            n_blocks_per_stage = [n_blocks_per_stage] * n_stages
+        if isinstance(n_conv_per_stage_decoder, int):
+            n_conv_per_stage_decoder = [n_conv_per_stage_decoder] * (n_stages - 1)
+        assert len(n_blocks_per_stage) == n_stages
+        assert len(n_conv_per_stage_decoder) == (n_stages - 1)
+
+        self.num_classes_aux = num_classes_aux
+
+        # encoder + decoder 跟 vanilla 一樣
+        self.encoder = ResidualEncoder(
+            input_channels, n_stages, features_per_stage, conv_op, kernel_sizes, strides,
+            n_blocks_per_stage, conv_bias, norm_op, norm_op_kwargs, dropout_op,
+            dropout_op_kwargs, nonlin, nonlin_kwargs, block, bottleneck_channels,
+            return_skips=True, disable_default_stem=False, stem_channels=stem_channels,
+        )
+        self.decoder = UNetDecoder(self.encoder, num_classes, n_conv_per_stage_decoder, deep_supervision)
+
+        # 輔助 head：跟 decoder.seg_layers 平行，channels 跟著 decoder stage 的輸出
+        # decoder 有 (n_stages - 1) 個 stage；stage s 輸出 features_per_stage[n_stages-2-s]
+        self.aux_seg_layers = nn.ModuleList([
+            conv_op(features_per_stage[n_stages - 2 - s], num_classes_aux, kernel_size=1, bias=True)
+            for s in range(n_stages - 1)
+        ])
+
+    def forward(self, x):
+        skips = self.encoder(x)
+
+        lres = skips[-1]
+        main_outputs = []
+        aux_outputs = []
+        deep_sup = self.decoder.deep_supervision
+        n_dec = len(self.decoder.stages)
+        for s in range(n_dec):
+            up = self.decoder.transpconvs[s](lres)
+            cat = torch.cat([up, skips[-(s + 2)]], dim=1)
+            out = self.decoder.stages[s](cat)
+            if deep_sup:
+                main_outputs.append(self.decoder.seg_layers[s](out))
+                aux_outputs.append(self.aux_seg_layers[s](out))
+            elif s == (n_dec - 1):
+                main_outputs.append(self.decoder.seg_layers[-1](out))
+                aux_outputs.append(self.aux_seg_layers[-1](out))
+            lres = out
+
+        main_outputs = main_outputs[::-1]
+        aux_outputs = aux_outputs[::-1]
+        if deep_sup:
+            return main_outputs, aux_outputs
+        return main_outputs[0], aux_outputs[0]
+
+    def compute_conv_feature_map_size(self, input_size):
+        assert len(input_size) == convert_conv_op_to_dim(self.encoder.conv_op)
+        return (self.encoder.compute_conv_feature_map_size(input_size)
+                + self.decoder.compute_conv_feature_map_size(input_size))
+
+    @staticmethod
+    def initialize(module):
+        InitWeights_He(1e-2)(module)
+        init_last_bn_before_add_to_0(module)
+
+
 """
 class ResidualUNet(nn.Module):
     def __init__(self,
