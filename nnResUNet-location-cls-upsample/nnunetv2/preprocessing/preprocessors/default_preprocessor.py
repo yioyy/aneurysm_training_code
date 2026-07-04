@@ -182,7 +182,10 @@ class DefaultPreprocessor(object):
         data, seg, properties = self.run_case(image_files, seg_file, plans_manager, configuration_manager,
                                                dataset_json, normal_file=normal_file, dilate_file=dilate_file)
         # print('dtypes', data.dtype, seg.dtype)
-        np.savez_compressed(output_filename_truncated + '.npz',  data=data.astype('float16'), seg=seg) #以float16保存
+        # MUTP: 直接寫 .npy + _seg.npy（跳過 .npz 中間態，省 preprocess 時間 + 避免 unpack 重複佔碟）
+        # 讀取端 (nnunet_dataset.load_case) 已有 .npy fallback，相容
+        np.save(output_filename_truncated + '.npy', data.astype('float16'))
+        np.save(output_filename_truncated + '_seg.npy', seg)
         write_pickle(properties, output_filename_truncated + '.pkl')
 
     @staticmethod

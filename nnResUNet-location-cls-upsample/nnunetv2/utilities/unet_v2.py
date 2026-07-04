@@ -545,7 +545,7 @@ class ResidualEncoderUNet_DualSegHead(nn.Module):
     """雙 segmentation head — 共用 encoder + decoder，最後接兩個獨立 head。
 
     主 head: infarct 分割（num_classes 個 class，通常 2 = bg/infarct）
-    輔 head: SynthSeg region 分割（num_classes_aux 個 class，通常 11 = bg + 10 regions）
+    輔 head: SynthSeg region 分割（num_classes_aux 個 class，例：SynthSeg_merged = 10，0=bg + 1-9 regions）
 
     Forward 回傳 tuple (main_logits, aux_logits)：
       - deep_supervision=False: (main, aux)，各 shape [B, C, ...]

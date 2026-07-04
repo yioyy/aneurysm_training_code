@@ -336,13 +336,19 @@ class nnUNetTrainer(object):
                  self.__class__.__name__ + '__' + self.plans_manager.plans_name + "__" +
                  self.configuration_manager.previous_stage_name, 'predicted_next_stage', self.configuration_name) \
                 if self.is_cascaded else None
-        # Dual-head multi-task: 把 aux seg 資料夾餵進 seg_from_prev_stage 機制，
-        # 讓 nnUNetDataset 自動把 aux seg 疊成 2nd channel。
-        # 由 mutp 在啟動訓練前 export MUTP_AUX_SEG_FOLDER=...
-        _aux_folder = os.environ.get("MUTP_AUX_SEG_FOLDER")
-        if _aux_folder and not self.is_cascaded:
-            self.folder_with_segs_from_previous_stage = _aux_folder
-            print(f"[MUTP] dual-head aux seg folder: {_aux_folder}")
+        # Dual-head multi-task: 餵 aux seg 進 seg_from_prev_stage 機制 → nnUNetDataset 自動疊成 2nd channel
+        # 由 mutp 在啟動訓練前設定：
+        #   MUTP_AUX_SEG_INLINE=true  → 新版扁平佈局：{case}_aux_seg.npz 跟主檔同層（dataset 端用 sentinel 處理）
+        #   MUTP_AUX_SEG_FOLDER=<dir> → 舊版獨立資料夾：<dir>/{case}.npz
+        if not self.is_cascaded:
+            _aux_inline = os.environ.get("MUTP_AUX_SEG_INLINE", "").lower() in ("1", "true", "yes")
+            _aux_folder = os.environ.get("MUTP_AUX_SEG_FOLDER")
+            if _aux_inline:
+                self.folder_with_segs_from_previous_stage = "MUTP_INLINE_AUX_SEG"
+                print(f"[MUTP] dual-head aux seg: inline ({{case}}_aux_seg.npz alongside data)")
+            elif _aux_folder:
+                self.folder_with_segs_from_previous_stage = _aux_folder
+                print(f"[MUTP] dual-head aux seg folder: {_aux_folder}")
 
         ### Some hyperparameters for you to fiddle with
         self.initial_lr = initial_lr
@@ -449,7 +455,24 @@ class nnUNetTrainer(object):
             # 自動偵測是否有雙 seg head (multi-task: main = infarct, aux = SynthSeg region)
             # Dual-head model forward 回傳 (main, aux) tuple；target 必須是 2-channel (infarct + region)
             self.has_aux_seg_head = self.configuration_manager.UNet_class_name in self._DUAL_SEG_HEAD_NAMES
+            # aux_loss_weight 優先順序: MUTP_MULTI_HEAD_CONFIG json > class attr AUX_LOSS_WEIGHT > 預設 1.0
             self.aux_loss_weight = getattr(self, "AUX_LOSS_WEIGHT", 1.0)
+            self.multi_head_config = None
+            _mh_path = os.environ.get("MUTP_MULTI_HEAD_CONFIG")
+            if self.has_aux_seg_head and _mh_path and os.path.isfile(_mh_path):
+                import json as _json
+                with open(_mh_path) as _f:
+                    self.multi_head_config = _json.load(_f)
+                if self.multi_head_config.get("enabled") and len(self.multi_head_config.get("heads", [])) >= 2:
+                    _aux = self.multi_head_config["heads"][1]
+                    self.aux_loss_weight = float(_aux.get("loss", {}).get("weight", 1.0))
+                    self.print_to_log_file(
+                        f'[multi-head] config loaded from {_mh_path}: '
+                        f'main={self.multi_head_config["heads"][0]["name"]}/'
+                        f'{self.multi_head_config["heads"][0]["num_classes"]}cls, '
+                        f'aux={_aux["name"]}/{_aux["num_classes"]}cls, '
+                        f'aux_loss_weight={self.aux_loss_weight}'
+                    )
             self.print_to_log_file(
                 f'has_aux_seg_head: {self.has_aux_seg_head}'
                 + (f' (aux_loss_weight={self.aux_loss_weight})' if self.has_aux_seg_head else '')

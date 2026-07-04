@@ -40,12 +40,21 @@ class nnUNetDataset(object):
             case_identifiers = get_case_identifiers(folder)
         case_identifiers.sort()
 
+        # mutp multi-head: aux seg can live INLINE in same dir as case data, named "{case}_aux_seg.npz"
+        # Sentinel "MUTP_INLINE" tells us to use this convention instead of the cascaded-stage folder pattern.
+        _MUTP_INLINE_AUX_SENTINEL = "MUTP_INLINE_AUX_SEG"
+        _inline_aux = (folder_with_segs_from_previous_stage == _MUTP_INLINE_AUX_SENTINEL)
+
         self.dataset = {}
         for c in case_identifiers:
             self.dataset[c] = {}
             self.dataset[c]['data_file'] = join(folder, "%s.npz" % c)
             self.dataset[c]['properties_file'] = join(folder, "%s.pkl" % c)
-            if folder_with_segs_from_previous_stage is not None:
+            if _inline_aux:
+                # aux file lives alongside data file with _aux_seg.npz suffix
+                self.dataset[c]['seg_from_prev_stage_file'] = join(folder, "%s_aux_seg.npz" % c)
+            elif folder_with_segs_from_previous_stage is not None:
+                # original cascaded-stage mechanism: separate folder, {case}.npz files
                 self.dataset[c]['seg_from_prev_stage_file'] = join(folder_with_segs_from_previous_stage, "%s.npz" % c)
 
         if len(case_identifiers) <= num_images_properties_loading_threshold:
@@ -106,7 +115,12 @@ class nnUNetDataset(object):
                 seg_prev = np.load(entry['seg_from_prev_stage_file'][:-4] + ".npy", 'r')
             else:
                 seg_prev = np.load(entry['seg_from_prev_stage_file'])['seg']
-            seg = np.vstack((seg, seg_prev[None]))
+            # Original behavior assumed seg_prev is (Z,Y,X) → add channel via [None] → (1,Z,Y,X).
+            # mutp multi-head aux files are saved as (1,Z,Y,X) already (nnUNet preprocessor output).
+            # Tolerate both: only add the leading channel dim if it's missing.
+            if seg_prev.ndim == seg.ndim - 1:
+                seg_prev = seg_prev[None]
+            seg = np.vstack((seg, seg_prev))
 
         return data, seg, entry['properties']
 

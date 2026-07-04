@@ -26,10 +26,20 @@ def _convert_to_npy(npz_file: str, unpack_segmentation: bool = True, overwrite_e
 def unpack_dataset(folder: str, unpack_segmentation: bool = True, overwrite_existing: bool = False,
                    num_processes: int = default_num_processes):
     """
-    all npz files in this folder belong to the dataset, unpack them all
+    Unpack all npz files in folder → npy.
+
+    MUTP change: 新 preprocessor 直接寫 .npy 不寫 .npz，此時整個 folder 沒 .npz → early return，
+    避免無謂啟動 multiprocessing pool。
+
+    Excludes mutp multi-head inline aux files ({case}_aux_seg.npz): those carry only a 'seg' key
+    (not 'data'), so unpacking them as main case files would raise KeyError. They are loaded
+    on-demand from inside nnUNetDataset, not via unpack.
     """
+    npz_files = subfiles(folder, True, None, ".npz", True)
+    npz_files = [f for f in npz_files if not f.endswith("_aux_seg.npz")]
+    if not npz_files:
+        return  # 新格式：全部 .npy，無 .npz 可 unpack
     with multiprocessing.get_context("spawn").Pool(num_processes) as p:
-        npz_files = subfiles(folder, True, None, ".npz", True)
         p.starmap(_convert_to_npy, zip(npz_files,
                                        [unpack_segmentation] * len(npz_files),
                                        [overwrite_existing] * len(npz_files))
@@ -38,10 +48,27 @@ def unpack_dataset(folder: str, unpack_segmentation: bool = True, overwrite_exis
 
 def get_case_identifiers(folder: str) -> List[str]:
     """
-    finds all npz files in the given folder and reconstructs the training case names from them
+    Finds case identifiers in the given folder.
+
+    MUTP change: 掃 .npy (新 preprocessor 產出) 和 .npz (舊 preprocessor 產出) 兩種，去重。
+    這樣新舊 preprocess 出的 dataset 都能被讀取。
+
+    Excludes:
+      - segFromPrevStage: original nnUNet cascaded-stage aux files
+      - _seg.npy:         segmentation label files (not a case)
+      - _aux_seg.npy/npz: mutp multi-head inline aux seg files
     """
-    case_identifiers = [i[:-4] for i in os.listdir(folder) if i.endswith("npz") and (i.find("segFromPrevStage") == -1)]
-    return case_identifiers
+    seen = set()
+    for i in os.listdir(folder):
+        if "segFromPrevStage" in i:
+            continue
+        if i.endswith("_seg.npy") or i.endswith("_seg.npz"):
+            continue
+        if i.endswith("_aux_seg.npy") or i.endswith("_aux_seg.npz"):
+            continue
+        if i.endswith(".npy") or i.endswith(".npz"):
+            seen.add(i[:-4])
+    return list(seen)
 
 
 def build_sampling_probabilities(
