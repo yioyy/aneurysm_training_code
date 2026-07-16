@@ -1494,6 +1494,563 @@ class ResidualEncoderUNetGuidedClassifier2D(nn.Module):
         init_last_bn_before_add_to_0(module)
 
 
+# ============================================================
+# S7-S10 hybrids: mask-fusion backbone (DeepConcat/SPADEDecoder) + classifier head
+# 輸入 x: [B, image_channels + 1, ...]  最後 channel = raw label (vessel8 for aneurysm)
+# forward: 回傳 (seg_output, cls_logits) — 讓 trainer 走 has_cls_head 路徑
+# ============================================================
+
+
+class ResidualEncoderUNet_DeepConcat_AttentionClassifier(nn.Module):
+    """S7: DeepConcat backbone + Cross-Attention classifier head。
+    encoder/decoder 每 stage 後 concat mask one-hot → 1×1 conv fuse。
+    classifier 讀 encoder 最深 skip（已經帶 mask 資訊）。
+    """
+    def __init__(self,
+                 input_channels: int,
+                 n_stages: int,
+                 features_per_stage: Union[int, List[int], Tuple[int, ...]],
+                 conv_op: Type[_ConvNd],
+                 kernel_sizes: Union[int, List[int], Tuple[int, ...]],
+                 strides: Union[int, List[int], Tuple[int, ...]],
+                 n_blocks_per_stage: Union[int, List[int], Tuple[int, ...]],
+                 num_classes: int,
+                 n_conv_per_stage_decoder: Union[int, Tuple[int, ...], List[int]],
+                 conv_bias: bool = False,
+                 norm_op: Union[None, Type[nn.Module]] = None,
+                 norm_op_kwargs: dict = None,
+                 dropout_op: Union[None, Type[_DropoutNd]] = None,
+                 dropout_op_kwargs: dict = None,
+                 nonlin: Union[None, Type[torch.nn.Module]] = None,
+                 nonlin_kwargs: dict = None,
+                 deep_supervision: bool = False,
+                 block: Union[Type[BasicBlockD], Type[BottleneckD]] = BasicBlockD,
+                 bottleneck_channels: Union[int, List[int], Tuple[int, ...]] = None,
+                 stem_channels: int = None,
+                 mask_classes: int = 10,
+                 classifier_num_classes: int = 5,
+                 classifier_query_num: int = 4,
+                 classifier_num_heads: int = 4,
+                 classifier_dropout: float = 0.0,
+                 ):
+        super().__init__()
+        if isinstance(features_per_stage, int):
+            features_per_stage = [features_per_stage] * n_stages
+        features_per_stage = list(features_per_stage)
+        if isinstance(n_blocks_per_stage, int):
+            n_blocks_per_stage = [n_blocks_per_stage] * n_stages
+        if isinstance(n_conv_per_stage_decoder, int):
+            n_conv_per_stage_decoder = [n_conv_per_stage_decoder] * (n_stages - 1)
+        assert len(n_blocks_per_stage) == n_stages
+        assert len(n_conv_per_stage_decoder) == (n_stages - 1)
+
+        self.mask_classes = mask_classes
+        self.image_channels = input_channels - 1
+        assert self.image_channels >= 1
+
+        self.encoder = ResidualEncoder(
+            self.image_channels, n_stages, features_per_stage, conv_op, kernel_sizes, strides,
+            n_blocks_per_stage, conv_bias, norm_op, norm_op_kwargs, dropout_op,
+            dropout_op_kwargs, nonlin, nonlin_kwargs, block, bottleneck_channels,
+            return_skips=True, disable_default_stem=False, stem_channels=stem_channels
+        )
+        self.decoder = UNetDecoder(self.encoder, num_classes, n_conv_per_stage_decoder, deep_supervision)
+
+        self.enc_fuse = nn.ModuleList([
+            conv_op(features_per_stage[i] + mask_classes, features_per_stage[i],
+                    kernel_size=1, bias=conv_bias)
+            for i in range(n_stages)
+        ])
+        self.dec_fuse = nn.ModuleList([
+            conv_op(features_per_stage[n_stages - 2 - s] + mask_classes,
+                    features_per_stage[n_stages - 2 - s],
+                    kernel_size=1, bias=conv_bias)
+            for s in range(n_stages - 1)
+        ])
+
+        self.classifier_head = AttentionClassifier(
+            features_per_stage=features_per_stage,
+            num_classes=classifier_num_classes,
+            query_num=classifier_query_num,
+            num_heads=classifier_num_heads,
+            dropout=classifier_dropout,
+        )
+
+    def _onehot_mask(self, mask_raw: torch.Tensor) -> torch.Tensor:
+        m = mask_raw.squeeze(1).round().long().clamp(0, self.mask_classes - 1)
+        oh = F.one_hot(m, num_classes=self.mask_classes)
+        dims = list(range(oh.dim()))
+        new_order = [0, dims[-1]] + dims[1:-1]
+        return oh.permute(*new_order).contiguous().to(
+            mask_raw.dtype if mask_raw.is_floating_point() else torch.float32
+        )
+
+    @staticmethod
+    def _resample_to(mask_oh: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if mask_oh.shape[2:] == target.shape[2:]:
+            return mask_oh
+        return F.interpolate(mask_oh, size=target.shape[2:], mode='nearest')
+
+    def forward(self, x):
+        image = x[:, :self.image_channels]
+        mask_raw = x[:, self.image_channels:self.image_channels + 1]
+        mask_oh = self._onehot_mask(mask_raw)
+
+        feat = image
+        if self.encoder.stem is not None:
+            feat = self.encoder.stem(feat)
+        skips = []
+        for i, stage in enumerate(self.encoder.stages):
+            feat = stage(feat)
+            mask_at = self._resample_to(mask_oh, feat)
+            feat = self.enc_fuse[i](torch.cat([feat, mask_at], dim=1))
+            skips.append(feat)
+
+        cls_output = self.classifier_head(skips)
+
+        lres = skips[-1]
+        seg_outputs = []
+        deep_sup = self.decoder.deep_supervision
+        n_dec = len(self.decoder.stages)
+        for s in range(n_dec):
+            up = self.decoder.transpconvs[s](lres)
+            cat = torch.cat([up, skips[-(s + 2)]], dim=1)
+            out = self.decoder.stages[s](cat)
+            mask_at = self._resample_to(mask_oh, out)
+            out = self.dec_fuse[s](torch.cat([out, mask_at], dim=1))
+            if deep_sup:
+                seg_outputs.append(self.decoder.seg_layers[s](out))
+            elif s == (n_dec - 1):
+                seg_outputs.append(self.decoder.seg_layers[-1](out))
+            lres = out
+        seg_outputs = seg_outputs[::-1]
+        seg_out = seg_outputs if deep_sup else seg_outputs[0]
+        return seg_out, cls_output
+
+    def compute_conv_feature_map_size(self, input_size):
+        assert len(input_size) == convert_conv_op_to_dim(self.encoder.conv_op)
+        return (self.encoder.compute_conv_feature_map_size(input_size)
+                + self.decoder.compute_conv_feature_map_size(input_size))
+
+    @staticmethod
+    def initialize(module):
+        InitWeights_He(1e-2)(module)
+        init_last_bn_before_add_to_0(module)
+
+
+class ResidualEncoderUNet_DeepConcat_GuidedClassifier(nn.Module):
+    """S8: DeepConcat backbone + Guided (Cross-Attention + FiLM) classifier。
+    分類特徵透過 FiLM 調制所有 skip → 影響 decoder seg 分佈（降低 FP）。
+    """
+    def __init__(self,
+                 input_channels: int,
+                 n_stages: int,
+                 features_per_stage: Union[int, List[int], Tuple[int, ...]],
+                 conv_op: Type[_ConvNd],
+                 kernel_sizes: Union[int, List[int], Tuple[int, ...]],
+                 strides: Union[int, List[int], Tuple[int, ...]],
+                 n_blocks_per_stage: Union[int, List[int], Tuple[int, ...]],
+                 num_classes: int,
+                 n_conv_per_stage_decoder: Union[int, Tuple[int, ...], List[int]],
+                 conv_bias: bool = False,
+                 norm_op: Union[None, Type[nn.Module]] = None,
+                 norm_op_kwargs: dict = None,
+                 dropout_op: Union[None, Type[_DropoutNd]] = None,
+                 dropout_op_kwargs: dict = None,
+                 nonlin: Union[None, Type[torch.nn.Module]] = None,
+                 nonlin_kwargs: dict = None,
+                 deep_supervision: bool = False,
+                 block: Union[Type[BasicBlockD], Type[BottleneckD]] = BasicBlockD,
+                 bottleneck_channels: Union[int, List[int], Tuple[int, ...]] = None,
+                 stem_channels: int = None,
+                 mask_classes: int = 10,
+                 classifier_num_classes: int = 5,
+                 classifier_query_num: int = 4,
+                 classifier_num_heads: int = 4,
+                 classifier_dropout: float = 0.0,
+                 ):
+        super().__init__()
+        if isinstance(features_per_stage, int):
+            features_per_stage = [features_per_stage] * n_stages
+        features_per_stage = list(features_per_stage)
+        self.features_per_stage = features_per_stage
+        if isinstance(n_blocks_per_stage, int):
+            n_blocks_per_stage = [n_blocks_per_stage] * n_stages
+        if isinstance(n_conv_per_stage_decoder, int):
+            n_conv_per_stage_decoder = [n_conv_per_stage_decoder] * (n_stages - 1)
+        assert len(n_blocks_per_stage) == n_stages
+        assert len(n_conv_per_stage_decoder) == (n_stages - 1)
+
+        self.mask_classes = mask_classes
+        self.image_channels = input_channels - 1
+        assert self.image_channels >= 1
+
+        self.encoder = ResidualEncoder(
+            self.image_channels, n_stages, features_per_stage, conv_op, kernel_sizes, strides,
+            n_blocks_per_stage, conv_bias, norm_op, norm_op_kwargs, dropout_op,
+            dropout_op_kwargs, nonlin, nonlin_kwargs, block, bottleneck_channels,
+            return_skips=True, disable_default_stem=False, stem_channels=stem_channels
+        )
+        self.decoder = UNetDecoder(self.encoder, num_classes, n_conv_per_stage_decoder, deep_supervision)
+
+        self.enc_fuse = nn.ModuleList([
+            conv_op(features_per_stage[i] + mask_classes, features_per_stage[i],
+                    kernel_size=1, bias=conv_bias)
+            for i in range(n_stages)
+        ])
+        self.dec_fuse = nn.ModuleList([
+            conv_op(features_per_stage[n_stages - 2 - s] + mask_classes,
+                    features_per_stage[n_stages - 2 - s],
+                    kernel_size=1, bias=conv_bias)
+            for s in range(n_stages - 1)
+        ])
+
+        cls_feature_dim = classifier_query_num * features_per_stage[-1]
+        self.classifier_head = CrossAttentionPoolingWithFeatures3D(
+            embed_dim=features_per_stage[-1],
+            query_num=classifier_query_num,
+            num_classes=classifier_num_classes,
+            num_heads=classifier_num_heads,
+            dropout=classifier_dropout,
+        )
+        self.film = FiLMConditioner(
+            cls_feature_dim=cls_feature_dim,
+            features_per_stage=features_per_stage,
+        )
+
+    def _onehot_mask(self, mask_raw: torch.Tensor) -> torch.Tensor:
+        m = mask_raw.squeeze(1).round().long().clamp(0, self.mask_classes - 1)
+        oh = F.one_hot(m, num_classes=self.mask_classes)
+        dims = list(range(oh.dim()))
+        new_order = [0, dims[-1]] + dims[1:-1]
+        return oh.permute(*new_order).contiguous().to(
+            mask_raw.dtype if mask_raw.is_floating_point() else torch.float32
+        )
+
+    @staticmethod
+    def _resample_to(mask_oh: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if mask_oh.shape[2:] == target.shape[2:]:
+            return mask_oh
+        return F.interpolate(mask_oh, size=target.shape[2:], mode='nearest')
+
+    def forward(self, x):
+        image = x[:, :self.image_channels]
+        mask_raw = x[:, self.image_channels:self.image_channels + 1]
+        mask_oh = self._onehot_mask(mask_raw)
+
+        feat = image
+        if self.encoder.stem is not None:
+            feat = self.encoder.stem(feat)
+        skips = []
+        for i, stage in enumerate(self.encoder.stages):
+            feat = stage(feat)
+            mask_at = self._resample_to(mask_oh, feat)
+            feat = self.enc_fuse[i](torch.cat([feat, mask_at], dim=1))
+            skips.append(feat)
+
+        cls_logits, cls_features = self.classifier_head(skips[-1])
+        conditioned_skips = self.film(cls_features, skips)
+
+        lres = conditioned_skips[-1]
+        seg_outputs = []
+        deep_sup = self.decoder.deep_supervision
+        n_dec = len(self.decoder.stages)
+        for s in range(n_dec):
+            up = self.decoder.transpconvs[s](lres)
+            cat = torch.cat([up, conditioned_skips[-(s + 2)]], dim=1)
+            out = self.decoder.stages[s](cat)
+            mask_at = self._resample_to(mask_oh, out)
+            out = self.dec_fuse[s](torch.cat([out, mask_at], dim=1))
+            if deep_sup:
+                seg_outputs.append(self.decoder.seg_layers[s](out))
+            elif s == (n_dec - 1):
+                seg_outputs.append(self.decoder.seg_layers[-1](out))
+            lres = out
+        seg_outputs = seg_outputs[::-1]
+        seg_out = seg_outputs if deep_sup else seg_outputs[0]
+        return seg_out, cls_logits
+
+    def compute_conv_feature_map_size(self, input_size):
+        assert len(input_size) == convert_conv_op_to_dim(self.encoder.conv_op)
+        return (self.encoder.compute_conv_feature_map_size(input_size)
+                + self.decoder.compute_conv_feature_map_size(input_size))
+
+    @staticmethod
+    def initialize(module):
+        InitWeights_He(1e-2)(module)
+        init_last_bn_before_add_to_0(module)
+
+
+class ResidualEncoderUNet_SPADEDecoder_AttentionClassifier(nn.Module):
+    """S9: SPADEDecoder backbone + Cross-Attention classifier。
+    encoder 純影像；decoder 每 stage 後 SPADE 用 mask one-hot 產生 (γ, β) 調制 feature。
+    classifier 讀 encoder 最深 skip（純影像特徵，不含 mask）。
+    """
+    def __init__(self,
+                 input_channels: int,
+                 n_stages: int,
+                 features_per_stage: Union[int, List[int], Tuple[int, ...]],
+                 conv_op: Type[_ConvNd],
+                 kernel_sizes: Union[int, List[int], Tuple[int, ...]],
+                 strides: Union[int, List[int], Tuple[int, ...]],
+                 n_blocks_per_stage: Union[int, List[int], Tuple[int, ...]],
+                 num_classes: int,
+                 n_conv_per_stage_decoder: Union[int, Tuple[int, ...], List[int]],
+                 conv_bias: bool = False,
+                 norm_op: Union[None, Type[nn.Module]] = None,
+                 norm_op_kwargs: dict = None,
+                 dropout_op: Union[None, Type[_DropoutNd]] = None,
+                 dropout_op_kwargs: dict = None,
+                 nonlin: Union[None, Type[torch.nn.Module]] = None,
+                 nonlin_kwargs: dict = None,
+                 deep_supervision: bool = False,
+                 block: Union[Type[BasicBlockD], Type[BottleneckD]] = BasicBlockD,
+                 bottleneck_channels: Union[int, List[int], Tuple[int, ...]] = None,
+                 stem_channels: int = None,
+                 mask_classes: int = 10,
+                 spade_hidden_channels: int = 128,
+                 classifier_num_classes: int = 5,
+                 classifier_query_num: int = 4,
+                 classifier_num_heads: int = 4,
+                 classifier_dropout: float = 0.0,
+                 ):
+        super().__init__()
+        if isinstance(features_per_stage, int):
+            features_per_stage = [features_per_stage] * n_stages
+        features_per_stage = list(features_per_stage)
+        if isinstance(n_blocks_per_stage, int):
+            n_blocks_per_stage = [n_blocks_per_stage] * n_stages
+        if isinstance(n_conv_per_stage_decoder, int):
+            n_conv_per_stage_decoder = [n_conv_per_stage_decoder] * (n_stages - 1)
+        assert len(n_blocks_per_stage) == n_stages
+        assert len(n_conv_per_stage_decoder) == (n_stages - 1)
+
+        self.mask_classes = mask_classes
+        self.image_channels = input_channels - 1
+        assert self.image_channels >= 1
+
+        self.encoder = ResidualEncoder(
+            self.image_channels, n_stages, features_per_stage, conv_op, kernel_sizes, strides,
+            n_blocks_per_stage, conv_bias, norm_op, norm_op_kwargs, dropout_op,
+            dropout_op_kwargs, nonlin, nonlin_kwargs, block, bottleneck_channels,
+            return_skips=True, disable_default_stem=False, stem_channels=stem_channels
+        )
+        self.decoder = UNetDecoder(self.encoder, num_classes, n_conv_per_stage_decoder, deep_supervision)
+
+        spatial_dim = convert_conv_op_to_dim(conv_op)
+        spade_norm_op = {2: nn.InstanceNorm2d, 3: nn.InstanceNorm3d}[spatial_dim]
+        self.dec_spade = nn.ModuleList([
+            SPADEBlock(
+                feature_channels=features_per_stage[n_stages - 2 - s],
+                mask_classes=mask_classes,
+                conv_op=conv_op,
+                norm_op=spade_norm_op,
+                hidden_channels=spade_hidden_channels,
+                use_alpha=False,
+                alpha_init=0.0,
+            )
+            for s in range(n_stages - 1)
+        ])
+
+        self.classifier_head = AttentionClassifier(
+            features_per_stage=features_per_stage,
+            num_classes=classifier_num_classes,
+            query_num=classifier_query_num,
+            num_heads=classifier_num_heads,
+            dropout=classifier_dropout,
+        )
+
+    def _onehot_mask(self, mask_raw: torch.Tensor) -> torch.Tensor:
+        m = mask_raw.squeeze(1).round().long().clamp(0, self.mask_classes - 1)
+        oh = F.one_hot(m, num_classes=self.mask_classes)
+        dims = list(range(oh.dim()))
+        new_order = [0, dims[-1]] + dims[1:-1]
+        return oh.permute(*new_order).contiguous().to(
+            mask_raw.dtype if mask_raw.is_floating_point() else torch.float32
+        )
+
+    @staticmethod
+    def _resample(mask_oh: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if mask_oh.shape[2:] == target.shape[2:]:
+            return mask_oh
+        return F.interpolate(mask_oh, size=target.shape[2:], mode='nearest')
+
+    def forward(self, x):
+        image = x[:, :self.image_channels]
+        mask_raw = x[:, self.image_channels:self.image_channels + 1]
+        mask_oh = self._onehot_mask(mask_raw)
+
+        skips = self.encoder(image)
+        cls_output = self.classifier_head(skips)
+
+        lres = skips[-1]
+        seg_outputs = []
+        deep_sup = self.decoder.deep_supervision
+        n_dec = len(self.decoder.stages)
+        for s in range(n_dec):
+            up = self.decoder.transpconvs[s](lres)
+            cat = torch.cat([up, skips[-(s + 2)]], dim=1)
+            out = self.decoder.stages[s](cat)
+            m = self._resample(mask_oh, out)
+            out = self.dec_spade[s](out, m)
+            if deep_sup:
+                seg_outputs.append(self.decoder.seg_layers[s](out))
+            elif s == (n_dec - 1):
+                seg_outputs.append(self.decoder.seg_layers[-1](out))
+            lres = out
+        seg_outputs = seg_outputs[::-1]
+        seg_out = seg_outputs if deep_sup else seg_outputs[0]
+        return seg_out, cls_output
+
+    def compute_conv_feature_map_size(self, input_size):
+        assert len(input_size) == convert_conv_op_to_dim(self.encoder.conv_op)
+        return (self.encoder.compute_conv_feature_map_size(input_size)
+                + self.decoder.compute_conv_feature_map_size(input_size))
+
+    @staticmethod
+    def initialize(module):
+        InitWeights_He(1e-2)(module)
+        init_last_bn_before_add_to_0(module)
+
+
+class ResidualEncoderUNet_SPADEDecoder_GuidedClassifier(nn.Module):
+    """S10: SPADEDecoder backbone + Guided (Cross-Attention + FiLM) classifier。
+    分類特徵先 FiLM 調制 skip，再進 decoder 做 SPADE 調制。
+    """
+    def __init__(self,
+                 input_channels: int,
+                 n_stages: int,
+                 features_per_stage: Union[int, List[int], Tuple[int, ...]],
+                 conv_op: Type[_ConvNd],
+                 kernel_sizes: Union[int, List[int], Tuple[int, ...]],
+                 strides: Union[int, List[int], Tuple[int, ...]],
+                 n_blocks_per_stage: Union[int, List[int], Tuple[int, ...]],
+                 num_classes: int,
+                 n_conv_per_stage_decoder: Union[int, Tuple[int, ...], List[int]],
+                 conv_bias: bool = False,
+                 norm_op: Union[None, Type[nn.Module]] = None,
+                 norm_op_kwargs: dict = None,
+                 dropout_op: Union[None, Type[_DropoutNd]] = None,
+                 dropout_op_kwargs: dict = None,
+                 nonlin: Union[None, Type[torch.nn.Module]] = None,
+                 nonlin_kwargs: dict = None,
+                 deep_supervision: bool = False,
+                 block: Union[Type[BasicBlockD], Type[BottleneckD]] = BasicBlockD,
+                 bottleneck_channels: Union[int, List[int], Tuple[int, ...]] = None,
+                 stem_channels: int = None,
+                 mask_classes: int = 10,
+                 spade_hidden_channels: int = 128,
+                 classifier_num_classes: int = 5,
+                 classifier_query_num: int = 4,
+                 classifier_num_heads: int = 4,
+                 classifier_dropout: float = 0.0,
+                 ):
+        super().__init__()
+        if isinstance(features_per_stage, int):
+            features_per_stage = [features_per_stage] * n_stages
+        features_per_stage = list(features_per_stage)
+        self.features_per_stage = features_per_stage
+        if isinstance(n_blocks_per_stage, int):
+            n_blocks_per_stage = [n_blocks_per_stage] * n_stages
+        if isinstance(n_conv_per_stage_decoder, int):
+            n_conv_per_stage_decoder = [n_conv_per_stage_decoder] * (n_stages - 1)
+        assert len(n_blocks_per_stage) == n_stages
+        assert len(n_conv_per_stage_decoder) == (n_stages - 1)
+
+        self.mask_classes = mask_classes
+        self.image_channels = input_channels - 1
+        assert self.image_channels >= 1
+
+        self.encoder = ResidualEncoder(
+            self.image_channels, n_stages, features_per_stage, conv_op, kernel_sizes, strides,
+            n_blocks_per_stage, conv_bias, norm_op, norm_op_kwargs, dropout_op,
+            dropout_op_kwargs, nonlin, nonlin_kwargs, block, bottleneck_channels,
+            return_skips=True, disable_default_stem=False, stem_channels=stem_channels
+        )
+        self.decoder = UNetDecoder(self.encoder, num_classes, n_conv_per_stage_decoder, deep_supervision)
+
+        spatial_dim = convert_conv_op_to_dim(conv_op)
+        spade_norm_op = {2: nn.InstanceNorm2d, 3: nn.InstanceNorm3d}[spatial_dim]
+        self.dec_spade = nn.ModuleList([
+            SPADEBlock(
+                feature_channels=features_per_stage[n_stages - 2 - s],
+                mask_classes=mask_classes,
+                conv_op=conv_op,
+                norm_op=spade_norm_op,
+                hidden_channels=spade_hidden_channels,
+                use_alpha=False,
+                alpha_init=0.0,
+            )
+            for s in range(n_stages - 1)
+        ])
+
+        cls_feature_dim = classifier_query_num * features_per_stage[-1]
+        self.classifier_head = CrossAttentionPoolingWithFeatures3D(
+            embed_dim=features_per_stage[-1],
+            query_num=classifier_query_num,
+            num_classes=classifier_num_classes,
+            num_heads=classifier_num_heads,
+            dropout=classifier_dropout,
+        )
+        self.film = FiLMConditioner(
+            cls_feature_dim=cls_feature_dim,
+            features_per_stage=features_per_stage,
+        )
+
+    def _onehot_mask(self, mask_raw: torch.Tensor) -> torch.Tensor:
+        m = mask_raw.squeeze(1).round().long().clamp(0, self.mask_classes - 1)
+        oh = F.one_hot(m, num_classes=self.mask_classes)
+        dims = list(range(oh.dim()))
+        new_order = [0, dims[-1]] + dims[1:-1]
+        return oh.permute(*new_order).contiguous().to(
+            mask_raw.dtype if mask_raw.is_floating_point() else torch.float32
+        )
+
+    @staticmethod
+    def _resample(mask_oh: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if mask_oh.shape[2:] == target.shape[2:]:
+            return mask_oh
+        return F.interpolate(mask_oh, size=target.shape[2:], mode='nearest')
+
+    def forward(self, x):
+        image = x[:, :self.image_channels]
+        mask_raw = x[:, self.image_channels:self.image_channels + 1]
+        mask_oh = self._onehot_mask(mask_raw)
+
+        skips = self.encoder(image)
+        cls_logits, cls_features = self.classifier_head(skips[-1])
+        conditioned_skips = self.film(cls_features, skips)
+
+        lres = conditioned_skips[-1]
+        seg_outputs = []
+        deep_sup = self.decoder.deep_supervision
+        n_dec = len(self.decoder.stages)
+        for s in range(n_dec):
+            up = self.decoder.transpconvs[s](lres)
+            cat = torch.cat([up, conditioned_skips[-(s + 2)]], dim=1)
+            out = self.decoder.stages[s](cat)
+            m = self._resample(mask_oh, out)
+            out = self.dec_spade[s](out, m)
+            if deep_sup:
+                seg_outputs.append(self.decoder.seg_layers[s](out))
+            elif s == (n_dec - 1):
+                seg_outputs.append(self.decoder.seg_layers[-1](out))
+            lres = out
+        seg_outputs = seg_outputs[::-1]
+        seg_out = seg_outputs if deep_sup else seg_outputs[0]
+        return seg_out, cls_logits
+
+    def compute_conv_feature_map_size(self, input_size):
+        assert len(input_size) == convert_conv_op_to_dim(self.encoder.conv_op)
+        return (self.encoder.compute_conv_feature_map_size(input_size)
+                + self.decoder.compute_conv_feature_map_size(input_size))
+
+    @staticmethod
+    def initialize(module):
+        InitWeights_He(1e-2)(module)
+        init_last_bn_before_add_to_0(module)
+
+
 if __name__ == '__main__':
     data = torch.rand((1, 4, 128, 128, 128))
 

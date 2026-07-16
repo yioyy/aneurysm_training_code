@@ -9,7 +9,11 @@ from nnunetv2.utilities.unet_v2 import (ResidualEncoderUNetClassifier, ResidualE
                                         ResidualEncoderUNet_SPADEDecoder,
                                         ResidualEncoderUNet_SPADEDecoderAlpha,
                                         ResidualEncoderUNet_SPADEFull,
-                                        ResidualEncoderUNet_DualSegHead)
+                                        ResidualEncoderUNet_DualSegHead,
+                                        ResidualEncoderUNet_DeepConcat_AttentionClassifier,
+                                        ResidualEncoderUNet_DeepConcat_GuidedClassifier,
+                                        ResidualEncoderUNet_SPADEDecoder_AttentionClassifier,
+                                        ResidualEncoderUNet_SPADEDecoder_GuidedClassifier)
 from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager, PlansManager
 from torch import nn
 
@@ -48,6 +52,10 @@ def get_network_from_plans(plans_manager: PlansManager,
         'ResidualEncoderUNet_SPADEDecoderAlpha': ResidualEncoderUNet_SPADEDecoderAlpha,
         'ResidualEncoderUNet_SPADEFull': ResidualEncoderUNet_SPADEFull,
         'ResidualEncoderUNet_DualSegHead': ResidualEncoderUNet_DualSegHead,
+        'ResidualEncoderUNet_DeepConcat_AttentionClassifier': ResidualEncoderUNet_DeepConcat_AttentionClassifier,
+        'ResidualEncoderUNet_DeepConcat_GuidedClassifier': ResidualEncoderUNet_DeepConcat_GuidedClassifier,
+        'ResidualEncoderUNet_SPADEDecoder_AttentionClassifier': ResidualEncoderUNet_SPADEDecoder_AttentionClassifier,
+        'ResidualEncoderUNet_SPADEDecoder_GuidedClassifier': ResidualEncoderUNet_SPADEDecoder_GuidedClassifier,
     }
     _default_kwargs = {
         'conv_bias': True,
@@ -73,7 +81,11 @@ def get_network_from_plans(plans_manager: PlansManager,
                          ResidualEncoderUNet_SPADEDecoder,
                          ResidualEncoderUNet_SPADEDecoderAlpha,
                          ResidualEncoderUNet_SPADEFull,
-                         ResidualEncoderUNet_DualSegHead)
+                         ResidualEncoderUNet_DualSegHead,
+                         ResidualEncoderUNet_DeepConcat_AttentionClassifier,
+                         ResidualEncoderUNet_DeepConcat_GuidedClassifier,
+                         ResidualEncoderUNet_SPADEDecoder_AttentionClassifier,
+                         ResidualEncoderUNet_SPADEDecoder_GuidedClassifier)
     conv_or_blocks_per_stage = {
         'n_blocks_per_stage' if network_class in _residual_classes else 'n_conv_per_stage': configuration_manager.n_conv_per_stage_encoder,
         'n_conv_per_stage_decoder': configuration_manager.n_conv_per_stage_decoder

@@ -430,6 +430,11 @@ class nnUNetTrainer(object):
         'ResidualEncoderUNetClassifier', 'ResidualEncoderUNetClassifier2D',
         'ResidualEncoderUNetAttentionClassifier', 'ResidualEncoderUNetAttentionClassifier2D',
         'ResidualEncoderUNetGuidedClassifier', 'ResidualEncoderUNetGuidedClassifier2D',
+        # S7-S10 hybrids: mask-fusion backbone + classifier
+        'ResidualEncoderUNet_DeepConcat_AttentionClassifier',
+        'ResidualEncoderUNet_DeepConcat_GuidedClassifier',
+        'ResidualEncoderUNet_SPADEDecoder_AttentionClassifier',
+        'ResidualEncoderUNet_SPADEDecoder_GuidedClassifier',
     }
 
     # 雙 seg head 模型名稱集合 — multi-task: main = infarct, aux = SynthSeg region
