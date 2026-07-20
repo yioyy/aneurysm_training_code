@@ -2057,15 +2057,23 @@ class nnUNetTrainer(object):
         self.logger.log('train_dice_per_class_or_region', global_dc_per_class, self.current_epoch)
 
         # === per-component loss 加總平均（compound loss 才有）===
+        # DDP：先算本 rank 平均，再跨 rank all_gather + mean，跟 train_loss 語意一致
         if 'loss_components' in outputs and outputs['loss_components']:
             comp_dicts = outputs['loss_components']   # list of dict
             comp_keys = comp_dicts[0].keys() if comp_dicts else []
             for k in comp_keys:
                 vals = [d.get(k, float('nan')) for d in comp_dicts]
+                local_mean = float(np.nanmean(vals))
+                if self.is_ddp:
+                    buf = [None for _ in range(dist.get_world_size())]
+                    dist.all_gather_object(buf, local_mean)
+                    logged_mean = float(np.mean(buf))
+                else:
+                    logged_mean = local_mean
                 key_name = f'train_loss_{k}'
                 if key_name not in self.logger.my_fantastic_logging:
                     self.logger.my_fantastic_logging[key_name] = list()
-                self.logger.log(key_name, float(np.nanmean(vals)), self.current_epoch)
+                self.logger.log(key_name, logged_mean, self.current_epoch)
 
         if self.enable_deep_supervision_logging:
             self.logger.log('train_ce_losses', ce_loss_here, self.current_epoch)
@@ -2342,15 +2350,23 @@ class nnUNetTrainer(object):
         self.logger.log('val_seg_losses', seg_loss_here, self.current_epoch)
 
         # === per-component validation loss（compound loss 才有）===
+        # DDP：跟 train 一樣做 all_gather + mean，跟 val_loss 語意一致
         if 'loss_components' in outputs_collated and outputs_collated['loss_components']:
             comp_dicts = outputs_collated['loss_components']
             comp_keys = comp_dicts[0].keys() if comp_dicts else []
             for k in comp_keys:
                 vals = [d.get(k, float('nan')) for d in comp_dicts]
+                local_mean = float(np.nanmean(vals))
+                if self.is_ddp:
+                    buf = [None for _ in range(dist.get_world_size())]
+                    dist.all_gather_object(buf, local_mean)
+                    logged_mean = float(np.mean(buf))
+                else:
+                    logged_mean = local_mean
                 key_name = f'val_loss_{k}'
                 if key_name not in self.logger.my_fantastic_logging:
                     self.logger.my_fantastic_logging[key_name] = list()
-                self.logger.log(key_name, float(np.nanmean(vals)), self.current_epoch)
+                self.logger.log(key_name, logged_mean, self.current_epoch)
 
         if self.enable_deep_supervision_logging:
             self.logger.log('val_ce_losses', ce_loss_here, self.current_epoch)
