@@ -265,7 +265,8 @@ def run_ddp(rank, dataset_name_or_id, configuration, fold, tr, p, use_compressed
             enable_sampling_weights, enable_normal_upsample,
             enable_deep_supervision_logging,
             enable_ema, ema_decay,
-            cls_foreground_labels, best_val_classes, augmentation_config, enable_gradient_accumulation, gradient_accumulation_steps):
+            cls_foreground_labels, best_val_classes, augmentation_config, enable_gradient_accumulation, gradient_accumulation_steps,
+            loss_config=None, model_extra_kwargs=None, disable_builtin_mlflow=False):
     setup_ddp(rank, world_size)
     torch.cuda.set_device(torch.device('cuda', dist.get_rank()))
 
@@ -293,6 +294,8 @@ def run_ddp(rank, dataset_name_or_id, configuration, fold, tr, p, use_compressed
                                            best_val_classes=best_val_classes,
                                            augmentation_config=augmentation_config,
                                            loss_config=loss_config,
+                                           model_extra_kwargs=model_extra_kwargs,
+                                           disable_builtin_mlflow=disable_builtin_mlflow,
                                            enable_gradient_accumulation=enable_gradient_accumulation,
                                            gradient_accumulation_steps=gradient_accumulation_steps)
 
@@ -301,6 +304,8 @@ def run_ddp(rank, dataset_name_or_id, configuration, fold, tr, p, use_compressed
 
     assert not (c and val), f'Cannot set --c and --val flag at the same time. Dummy.'
 
+    # DDP：initialize() 建 self.network 才能 load_pretrained_weights (single-GPU flow 也是這順序)
+    nnunet_trainer.initialize()
     maybe_load_checkpoint(nnunet_trainer, c, val, pretrained_weights)
 
     if torch.cuda.is_available():
@@ -408,7 +413,10 @@ def run_training(dataset_name_or_id: Union[str, int],
                      best_val_classes,
                      augmentation_config,
                      enable_gradient_accumulation,
-                     gradient_accumulation_steps),
+                     gradient_accumulation_steps,
+                     loss_config,
+                     model_extra_kwargs,
+                     disable_builtin_mlflow),
                  nprocs=num_gpus,
                  join=True)
     else:
