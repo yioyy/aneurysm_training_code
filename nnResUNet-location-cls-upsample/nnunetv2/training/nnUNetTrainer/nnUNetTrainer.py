@@ -1285,12 +1285,15 @@ class nnUNetTrainer(object):
         #num_cached = max(12, allowed_num_processes * 2)
         print('allowed_num_processes:', allowed_num_processes)
 
+        # GA-aware：LimitedLenWrapper 也要放大到 iterations × GA，train_step 才夠取
+        _ga_accum = self.GRADIENT_ACCUMULATION_STEPS if self.ENABLE_GRADIENT_ACCUMULATION else 1
+        _train_forward_calls = self.num_iterations_per_epoch * _ga_accum
         if allowed_num_processes == 0:
             mt_gen_train = SingleThreadedAugmenter(dl_tr, tr_transforms)
             mt_gen_val = SingleThreadedAugmenter(dl_val, val_transforms)
         else:
             print('used LimitedLenWrapper!!!')
-            mt_gen_train = LimitedLenWrapper(self.num_iterations_per_epoch, data_loader=dl_tr, transform=tr_transforms,
+            mt_gen_train = LimitedLenWrapper(_train_forward_calls, data_loader=dl_tr, transform=tr_transforms,
                                              num_processes=allowed_num_processes, num_cached=20, seeds=None,
                                              pin_memory=self.device.type == 'cuda', wait_time=0.02)
             mt_gen_val = LimitedLenWrapper(self.num_val_iterations_per_epoch, data_loader=dl_val,
@@ -2938,6 +2941,18 @@ class nnUNetTrainer(object):
                     "oversample_foreground_percent": self.oversample_foreground_percent
                 }
                 mlflow.log_params(ml_params)
+            # GA-aware iteration count：iterations_per_epoch 語意 = optimizer.step() 次數
+            # 內部要跑 iterations × accum_steps 次 train_step 才能達到 iterations 次 weight update
+            # (以前把 iter 當 train_step 次數 → GA 開啟後 weight update 頻率被稀釋 accum 倍 → 有 bug)
+            _ga_accum = self.GRADIENT_ACCUMULATION_STEPS if self.ENABLE_GRADIENT_ACCUMULATION else 1
+            _forward_calls_per_epoch = self.num_iterations_per_epoch * _ga_accum
+            if _ga_accum > 1:
+                self.print_to_log_file(
+                    f"[GA-aware] iterations_per_epoch={self.num_iterations_per_epoch} 代表 optimizer.step() 次數；"
+                    f"實際 forward = {_forward_calls_per_epoch} 次 (× GA={_ga_accum})",
+                    also_print_to_console=True,
+                )
+
             for epoch in range(self.current_epoch, self.num_epochs):
                 self.on_epoch_start() #只有一個訊息而已
 
@@ -2945,7 +2960,7 @@ class nnUNetTrainer(object):
                 train_outputs = []
                 AVE_Queue = []
                 start = time()
-                for batch_id in range(self.num_iterations_per_epoch):
+                for batch_id in range(_forward_calls_per_epoch):
                     train_outputs.append(self.train_step(next(self.dataloader_train)))
                     # EMA 參數更新（每個 train step 後）
                     if self.ENABLE_EMA:
