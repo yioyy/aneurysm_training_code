@@ -1817,7 +1817,9 @@ class nnUNetTrainer(object):
             else:
                 l = seg_l
 
-            # 梯度累積：loss 除以累積步數（等效於大 batch 的平均）
+            # 梯度累積：backward 用除過的 (等效大 batch 平均)，logging 保留 pre-GA 值
+            # 讓 train_loss / train_seg_loss / train_loss_CE 三者的量級一致，跨 GA/non-GA 實驗可比對
+            l_for_log = l.detach()   # 原始未除 accum 的總 loss（跟 CE+Dice 對得起來）
             if accum_steps > 1:
                 l = l / accum_steps
 
@@ -1907,8 +1909,9 @@ class nnUNetTrainer(object):
             dc0_val = dc0_val.mean()
 
         # 組裝 result
+        # 'loss' 用 pre-GA 版本 (l_for_log)，不用 l.detach()（已被 GA 除過會偏低）
         result = {
-            'loss': l.detach().cpu().numpy(),
+            'loss': l_for_log.cpu().numpy(),
             'seg_loss': seg_l.detach().cpu().numpy(),
             'tp_hard': tp_hard.cpu().numpy(),
             'fp_hard': fp_hard.cpu().numpy(),
