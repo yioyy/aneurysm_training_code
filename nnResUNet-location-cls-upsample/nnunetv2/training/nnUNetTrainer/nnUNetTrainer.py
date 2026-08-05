@@ -1282,8 +1282,15 @@ class nnUNetTrainer(object):
 
         allowed_num_processes = get_allowed_n_proc_DA()
         allowed_num_processes = 24
+        # DDP: worker 數量 × world_size 會爆 FD/pipe/shm，改小避免 dataloader stall
+        # 環境變數 MUTP_NUM_DA_WORKERS 可覆蓋，方便 debug DDP 卡住問題
+        import os as _os
+        if _os.environ.get('MUTP_NUM_DA_WORKERS'):
+            allowed_num_processes = int(_os.environ['MUTP_NUM_DA_WORKERS'])
+        elif self.is_ddp:
+            allowed_num_processes = max(1, allowed_num_processes // max(1, dist.get_world_size()))
         #num_cached = max(12, allowed_num_processes * 2)
-        print('allowed_num_processes:', allowed_num_processes)
+        print(f'allowed_num_processes: {allowed_num_processes} (is_ddp={self.is_ddp})')
 
         # GA-aware：LimitedLenWrapper 也要放大到 iterations × GA，train_step 才夠取
         _ga_accum = self.GRADIENT_ACCUMULATION_STEPS if self.ENABLE_GRADIENT_ACCUMULATION else 1
@@ -1839,13 +1846,13 @@ class nnUNetTrainer(object):
             self.grad_scaler.scale(l).backward()
             if is_last_accum:
                 self.grad_scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.network.parameters(), 12)
+                torch.nn.utils.clip_grad_norm_(self.network.parameters(), float(os.environ.get('NNUNET_GRAD_CLIP_NORM', 12)))
                 self.grad_scaler.step(self.optimizer)
                 self.grad_scaler.update()
         else:
             l.backward()
             if is_last_accum:
-                torch.nn.utils.clip_grad_norm_(self.network.parameters(), 12)
+                torch.nn.utils.clip_grad_norm_(self.network.parameters(), float(os.environ.get('NNUNET_GRAD_CLIP_NORM', 12)))
                 self.optimizer.step()
 
         self._accum_counter += 1
