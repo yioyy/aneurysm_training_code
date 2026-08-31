@@ -2081,3 +2081,304 @@ if __name__ == '__main__':
         del g
 
     print(model.compute_conv_feature_map_size(data.shape[2:]))
+
+
+# ============================================================
+# AMAP-style domain prompting —— case/patch 特徵條件化
+# 設計依據：docs/mra_aneurysm_sota_methods.md §E.8–E.13
+#           docs/plan_feature_conditioning_v4.md
+# ============================================================
+#
+# ⚠️ 與設計文件的兩處刻意偏離，都是為了「step 0 逐位元等於 baseline」這個性質：
+#
+# 1. cross-attention 的 η 預設 **0.0**（文件依 AMAP 原文寫 0.1）。
+#    η=0 時整個 block 退化為 identity；η 自己的梯度不為零（dL/dη = <attn_out, dL/dh>），
+#    一步之後就會離開 0，attention 內部參數隨即開始學。這是 ReZero / AdaLN-Zero 的標準做法。
+#    另外 FFN 的最後一層也 zero-init，否則 η=0 仍會被 FFN 改動 feature。
+#
+# 2. FiLM 寫成 **殘差式** `feat + γ·norm(feat) + β`（文件寫 `norm(feat)*(1+γ)+β`）。
+#    後者在 γ=β=0 時等於 `InstanceNorm(feat)`，**不是 identity** —— 原本的 decoder
+#    每個 stage 後並沒有這個 norm，會平白改變輸出。殘差式在 γ=β=0 時才真的是 identity。
+#
+# 這兩點讓 s1_prompt 在 epoch 0 的驗證指標必須等於 Dataset136 fold_0，可作為載入正確性的檢查點。
+
+
+class CasePromptEncoder(nn.Module):
+    """case-level 11 維 → K 個 prompt token。"""
+
+    def __init__(self, in_dim: int = 11, out_tokens: int = 5, dim: int = 128):
+        super().__init__()
+        self.out_tokens, self.dim = out_tokens, dim
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, dim), nn.GELU(),
+            nn.Linear(dim, out_tokens * dim),
+        )
+
+    def forward(self, v):                       # v: [B, in_dim]
+        return self.mlp(v).view(v.shape[0], self.out_tokens, self.dim)
+
+
+class PatchPromptEncoder(CasePromptEncoder):
+    """patch-level 14 維 → K 個 prompt token（結構同 case，只是輸入維度不同）。"""
+
+    def __init__(self, in_dim: int = 14, out_tokens: int = 3, dim: int = 128):
+        super().__init__(in_dim=in_dim, out_tokens=out_tokens, dim=dim)
+
+
+class PromptCrossAttentionBottleneck(nn.Module):
+    """Bottleneck 的一層 cross-attention：feature token 對 [feature ‖ prompt] 做 attend。
+
+    η 與 FFN 末層 zero-init → 初始為 identity（見本節開頭說明）。
+    """
+
+    def __init__(self, feat_channels: int, prompt_dim: int = 128,
+                 num_heads: int = 8, eta_init: float = 0.0):
+        super().__init__()
+        self.prompt_proj = (nn.Linear(prompt_dim, feat_channels)
+                            if prompt_dim != feat_channels else nn.Identity())
+        self.norm_q = nn.LayerNorm(feat_channels)
+        self.norm_kv = nn.LayerNorm(feat_channels)
+        heads = num_heads if feat_channels % num_heads == 0 else 1
+        self.attn = nn.MultiheadAttention(feat_channels, heads, batch_first=True)
+        self.eta = nn.Parameter(torch.tensor(float(eta_init)))
+        self.ffn = nn.Sequential(
+            nn.Linear(feat_channels, feat_channels * 2), nn.GELU(),
+            nn.Linear(feat_channels * 2, feat_channels),
+        )
+        nn.init.zeros_(self.ffn[-1].weight)
+        nn.init.zeros_(self.ffn[-1].bias)
+
+    def forward(self, feat, prompts):
+        # feat: [B, C, *spatial]；prompts: [B, K, prompt_dim]
+        b, c = feat.shape[:2]
+        spatial = feat.shape[2:]
+        tok = feat.flatten(2).transpose(1, 2)                    # [B, N, C]
+        kv = torch.cat([tok, self.prompt_proj(prompts)], dim=1)  # [B, N+K, C]
+        out, _ = self.attn(self.norm_q(tok), self.norm_kv(kv), self.norm_kv(kv))
+        h = tok + self.eta * out
+        h = h + self.ffn(h)
+        return h.transpose(1, 2).view(b, c, *spatial)
+
+
+class FiLMFromPrompt(nn.Module):
+    """global prompt → per-channel (γ, β)，殘差式套用，zero-init 時為 identity。"""
+
+    def __init__(self, prompt_dim: int, feat_channels: int, conv_dim: int = 3):
+        super().__init__()
+        self.conv_dim = conv_dim
+        self.norm = {2: nn.InstanceNorm2d, 3: nn.InstanceNorm3d}[conv_dim](
+            feat_channels, affine=False)
+        self.to_film = nn.Linear(prompt_dim, 2 * feat_channels)
+        nn.init.zeros_(self.to_film.weight)
+        nn.init.zeros_(self.to_film.bias)
+
+    def forward(self, feat, prompts):
+        g, b = self.to_film(prompts.mean(dim=1)).chunk(2, dim=-1)
+        shape = (-1, feat.shape[1]) + (1,) * self.conv_dim
+        return feat + g.view(*shape) * self.norm(feat) + b.view(*shape)
+
+
+class _PromptMixin(nn.Module):
+    """共用的 prompt 產生邏輯：shared tokens + case tokens + patch tokens。"""
+
+    def _build_prompt_modules(self, prompt_dim, n_shared, case_dim, patch_dim,
+                              n_case_tokens=5, n_patch_tokens=3, use_patch=True):
+        self.prompt_dim = prompt_dim
+        self.use_patch = use_patch
+        self.shared_prompts = nn.Parameter(torch.randn(n_shared, prompt_dim) * 0.02)
+        self.case_mlp = CasePromptEncoder(case_dim, n_case_tokens, prompt_dim)
+        self.patch_mlp = (PatchPromptEncoder(patch_dim, n_patch_tokens, prompt_dim)
+                          if use_patch else None)
+
+    def _make_prompts(self, b, case_vec, patch_vec, device, dtype):
+        toks = [self.shared_prompts.unsqueeze(0).expand(b, -1, -1).to(dtype)]
+        if case_vec is None:
+            case_vec = torch.zeros(b, self.case_mlp.mlp[0].in_features,
+                                   device=device, dtype=dtype)
+        toks.append(self.case_mlp(case_vec.to(dtype)))
+        if self.use_patch:
+            if patch_vec is None:
+                patch_vec = torch.zeros(b, self.patch_mlp.mlp[0].in_features,
+                                        device=device, dtype=dtype)
+            toks.append(self.patch_mlp(patch_vec.to(dtype)))
+        return torch.cat(toks, dim=1)
+
+
+class ResidualEncoderUNet_Prompt(ResidualEncoderUNet, _PromptMixin):
+    """S1 + prompt：encoder/decoder 結構與 ResidualEncoderUNet 完全相同（1ch 輸入），
+    只在 bottleneck 加 cross-attention、每個 decoder stage 後加 FiLM。
+
+    因為結構同構且 prompt 模組 zero-init，載入 Dataset136 fold_0 後
+    **step 0 的輸出與 baseline 逐位元相同**。
+    """
+
+    def __init__(self, *args, prompt_dim: int = 128, n_shared_tokens: int = 8,
+                 case_feature_dim: int = 11, patch_feature_dim: int = 14,
+                 use_patch_prompt: bool = True, eta_init: float = 0.0,
+                 network_in_channels: int = None, **kwargs):
+        # network_in_channels：覆寫 plans 的輸入通道數。
+        # s1 用 2ch 資料集（ch1 供 dataloader 算 patch 特徵），但網路只吃 ch0（MRA），
+        # 必須維持 1ch 才能載入 Dataset136 的 1ch stem —— 那是「step 0 等於 baseline」的前提。
+        if network_in_channels is not None:
+            if args:
+                args = (network_in_channels,) + tuple(args[1:])
+            else:
+                kwargs["input_channels"] = network_in_channels
+        super().__init__(*args, **kwargs)
+        self._build_prompt_modules(prompt_dim, n_shared_tokens,
+                                   case_feature_dim, patch_feature_dim,
+                                   use_patch=use_patch_prompt)
+        feats = [s.output_channels for s in self.encoder.stages]
+        conv_dim = convert_conv_op_to_dim(self.encoder.conv_op)
+        self.bottleneck_attn = PromptCrossAttentionBottleneck(
+            feats[-1], prompt_dim, eta_init=eta_init)
+        n_dec = len(self.decoder.stages)
+        self.dec_film = nn.ModuleList([
+            FiLMFromPrompt(prompt_dim, feats[len(feats) - 2 - s], conv_dim)
+            for s in range(n_dec)
+        ])
+
+    def forward(self, x, case_vec=None, patch_vec=None):
+        prompts = self._make_prompts(x.shape[0], case_vec, patch_vec, x.device, x.dtype)
+        skips = self.encoder(x)
+        skips = list(skips)
+        skips[-1] = self.bottleneck_attn(skips[-1], prompts)
+
+        lres, seg_outputs = skips[-1], []
+        deep_sup = self.decoder.deep_supervision
+        n_dec = len(self.decoder.stages)
+        for s in range(n_dec):
+            up = self.decoder.transpconvs[s](lres)
+            out = self.decoder.stages[s](torch.cat([up, skips[-(s + 2)]], dim=1))
+            out = self.dec_film[s](out, prompts)
+            if deep_sup:
+                seg_outputs.append(self.decoder.seg_layers[s](out))
+            elif s == (n_dec - 1):
+                seg_outputs.append(self.decoder.seg_layers[-1](out))
+            lres = out
+        seg_outputs = seg_outputs[::-1]
+        return seg_outputs if deep_sup else seg_outputs[0]
+
+
+# ------------------------------------------------------------
+# S2 / S3 的 prompt 版本
+#
+# ⚠️ 第三處刻意偏離設計文件：文件的 `SPADEWithPrompt` 把 prompt bias 併進 SPADE 的 γ/β
+#    一起算；這裡改成**串接** —— 先跑既有的 SPADE / DeepConcat fuse，再套一層殘差式 FiLM。
+#    兩者在數學上都是「spatial 調制 + global per-channel affine」，但串接版：
+#      (1) 完全不動已訓練好的 SPADEBlock / fuse conv，載入既有權重時零風險
+#      (2) FiLM zero-init → **加上 prompt 後與原架構逐位元相同**，可驗證
+#    代價是多一次 InstanceNorm 的計算，可忽略。
+#
+# ⚠️ 注意：s2/s3 從 Dataset136 fold_0 載入時，enc_fuse / dec_fuse / dec_spade 是全新模組，
+#    必然隨機初始化 —— 所以 s2/s3 **沒有** s1 那種「step 0 等於 Dataset136」的性質。
+#    它們的恆等性是相對於「同權重的非 prompt 版本」而言。
+# ------------------------------------------------------------
+
+
+def _attach_prompt_blocks(self, prompt_dim, n_shared, case_dim, patch_dim,
+                          use_patch, eta_init, feats, conv_dim, n_dec):
+    """s2/s3 共用：建 prompt encoder + bottleneck attention + 每 decoder stage 的 FiLM。"""
+    self._build_prompt_modules(prompt_dim, n_shared, case_dim, patch_dim,
+                               use_patch=use_patch)
+    self.bottleneck_attn = PromptCrossAttentionBottleneck(
+        feats[-1], prompt_dim, eta_init=eta_init)
+    self.dec_film = nn.ModuleList([
+        FiLMFromPrompt(prompt_dim, feats[len(feats) - 2 - s], conv_dim)
+        for s in range(n_dec)
+    ])
+
+
+class ResidualEncoderUNet_DeepConcatPrompt(ResidualEncoderUNet_DeepConcat, _PromptMixin):
+    """S2 + prompt：vessel4 走 input concat + 每 stage fuse（原樣），另加 prompt 條件化。"""
+
+    def __init__(self, *args, prompt_dim: int = 128, n_shared_tokens: int = 8,
+                 case_feature_dim: int = 11, patch_feature_dim: int = 14,
+                 use_patch_prompt: bool = True, eta_init: float = 0.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        feats = [s.output_channels for s in self.encoder.stages]
+        _attach_prompt_blocks(self, prompt_dim, n_shared_tokens, case_feature_dim,
+                              patch_feature_dim, use_patch_prompt, eta_init, feats,
+                              convert_conv_op_to_dim(self.encoder.conv_op),
+                              len(self.decoder.stages))
+
+    def forward(self, x, case_vec=None, patch_vec=None):
+        prompts = self._make_prompts(x.shape[0], case_vec, patch_vec, x.device, x.dtype)
+        image = x[:, :self.image_channels]
+        mask_oh = self._onehot_mask(x[:, self.image_channels:self.image_channels + 1])
+
+        feat = image
+        if self.encoder.stem is not None:
+            feat = self.encoder.stem(feat)
+        skips = []
+        for i, stage in enumerate(self.encoder.stages):
+            feat = stage(feat)
+            feat = self.enc_fuse[i](torch.cat([feat, self._resample_to(mask_oh, feat)], dim=1))
+            skips.append(feat)
+        skips[-1] = self.bottleneck_attn(skips[-1], prompts)
+
+        lres, seg_outputs = skips[-1], []
+        deep_sup = self.decoder.deep_supervision
+        n_dec = len(self.decoder.stages)
+        for s in range(n_dec):
+            up = self.decoder.transpconvs[s](lres)
+            out = self.decoder.stages[s](torch.cat([up, skips[-(s + 2)]], dim=1))
+            out = self.dec_fuse[s](torch.cat([out, self._resample_to(mask_oh, out)], dim=1))
+            out = self.dec_film[s](out, prompts)
+            if deep_sup:
+                seg_outputs.append(self.decoder.seg_layers[s](out))
+            elif s == (n_dec - 1):
+                seg_outputs.append(self.decoder.seg_layers[-1](out))
+            lres = out
+        seg_outputs = seg_outputs[::-1]
+        return seg_outputs if deep_sup else seg_outputs[0]
+
+
+class ResidualEncoderUNet_SPADEDecoderPrompt(ResidualEncoderUNet_SPADE, _PromptMixin):
+    """S3 + prompt：decoder 每 stage 先 vanilla SPADE（vessel4 空間條件），再套 prompt FiLM。"""
+
+    def __init__(self, *args, prompt_dim: int = 128, n_shared_tokens: int = 8,
+                 case_feature_dim: int = 11, patch_feature_dim: int = 14,
+                 use_patch_prompt: bool = True, eta_init: float = 0.0, **kwargs):
+        kwargs.setdefault('inject_in_decoder', True)
+        kwargs.setdefault('inject_in_encoder', False)
+        kwargs.setdefault('use_alpha', False)
+        super().__init__(*args, **kwargs)
+        feats = [s.output_channels for s in self.encoder.stages]
+        _attach_prompt_blocks(self, prompt_dim, n_shared_tokens, case_feature_dim,
+                              patch_feature_dim, use_patch_prompt, eta_init, feats,
+                              convert_conv_op_to_dim(self.encoder.conv_op),
+                              len(self.decoder.stages))
+
+    def forward(self, x, case_vec=None, patch_vec=None):
+        prompts = self._make_prompts(x.shape[0], case_vec, patch_vec, x.device, x.dtype)
+        image = x[:, :self.image_channels]
+        mask_oh = self._onehot_mask(x[:, self.image_channels:self.image_channels + 1])
+
+        feat = image
+        if self.encoder.stem is not None:
+            feat = self.encoder.stem(feat)
+        skips = []
+        for i, stage in enumerate(self.encoder.stages):
+            feat = stage(feat)
+            if self.inject_in_encoder:
+                feat = self.enc_spade[i](feat, self._resample(mask_oh, feat))
+            skips.append(feat)
+        skips[-1] = self.bottleneck_attn(skips[-1], prompts)
+
+        lres, seg_outputs = skips[-1], []
+        deep_sup = self.decoder.deep_supervision
+        n_dec = len(self.decoder.stages)
+        for s in range(n_dec):
+            up = self.decoder.transpconvs[s](lres)
+            out = self.decoder.stages[s](torch.cat([up, skips[-(s + 2)]], dim=1))
+            if self.inject_in_decoder:
+                out = self.dec_spade[s](out, self._resample(mask_oh, out))
+            out = self.dec_film[s](out, prompts)
+            if deep_sup:
+                seg_outputs.append(self.decoder.seg_layers[s](out))
+            elif s == (n_dec - 1):
+                seg_outputs.append(self.decoder.seg_layers[-1](out))
+            lres = out
+        seg_outputs = seg_outputs[::-1]
+        return seg_outputs if deep_sup else seg_outputs[0]

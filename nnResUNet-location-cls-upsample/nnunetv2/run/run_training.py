@@ -174,6 +174,16 @@ def get_trainer_from_args(dataset_name_or_id: Union[int, str],
 
     # model extra kwargs（from MUTP recipe.model.extra）— 例：SPADE α 初值
     if model_extra_kwargs:
+        # ⚠ 必須同時設在 **class** 上：build_network_architecture 是
+        #   `getattr(nnUNetTrainer, 'MODEL_EXTRA_KWARGS', None)`，讀的是基底類別屬性。
+        #   只設 instance 屬性的話建網路時讀不到（曾導致 network_in_channels 失效，
+        #   s1 的 stem 仍被建成 2ch 而載不進 1ch 預訓練權重）。
+        from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer as _BaseTrainer
+        _BaseTrainer.MODEL_EXTRA_KWARGS = dict(model_extra_kwargs)
+        try:                       # 子類別可能是 immutable type，設不了就略過
+            type(nnunet_trainer).MODEL_EXTRA_KWARGS = dict(model_extra_kwargs)
+        except TypeError:
+            pass
         nnunet_trainer.MODEL_EXTRA_KWARGS = dict(model_extra_kwargs)
         print(f'MUTP model extra kwargs: {model_extra_kwargs}')
 
