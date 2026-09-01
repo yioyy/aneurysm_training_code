@@ -2106,23 +2106,34 @@ if __name__ == '__main__':
 class CasePromptEncoder(nn.Module):
     """case-level 11 維 → K 個 prompt token。"""
 
-    def __init__(self, in_dim: int = 11, out_tokens: int = 5, dim: int = 128):
+    def __init__(self, in_dim: int = 11, out_tokens: int = 5, dim: int = 128,
+                 input_norm: bool = False):
         super().__init__()
         self.out_tokens, self.dim = out_tokens, dim
+        # input_norm 只給 patch 分支用，case 11 維已在外部套 TRAIN 的 mu/sigma
+        # （那是 README 的部署契約：新醫院一律沿用訓練集參數，不得重新擬合）。
+        self.in_norm = nn.BatchNorm1d(in_dim) if input_norm else nn.Identity()
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, dim), nn.GELU(),
             nn.Linear(dim, out_tokens * dim),
         )
 
     def forward(self, v):                       # v: [B, in_dim]
-        return self.mlp(v).view(v.shape[0], self.out_tokens, self.dim)
+        return self.mlp(self.in_norm(v)).view(v.shape[0], self.out_tokens, self.dim)
 
 
 class PatchPromptEncoder(CasePromptEncoder):
-    """patch-level 14 維 → K 個 prompt token（結構同 case，只是輸入維度不同）。"""
+    """patch-level 13 維 → K 個 prompt token。
 
-    def __init__(self, in_dim: int = 14, out_tokens: int = 3, dim: int = 128):
-        super().__init__(in_dim=in_dim, out_tokens=out_tokens, dim=dim)
+    輸入端有 BatchNorm1d：patch 特徵是動態算的原始值，各維尺度差到 64 倍
+    （實測 patch_coord std 0.44、neighbor_MCA/ACA/VB 只有 0.008~0.012），
+    而第一層是裸 Linear，各維貢獻與梯度都正比於其 std —— 小尺度那幾維會慢
+    40~55 倍才學得動。用 BN 而非外部 normstats CSV，是因為統計量存在
+    checkpoint 裡跟著權重走，訓練與推論結構上不可能不同步。
+    """
+
+    def __init__(self, in_dim: int = 13, out_tokens: int = 3, dim: int = 128):
+        super().__init__(in_dim=in_dim, out_tokens=out_tokens, dim=dim, input_norm=True)
 
 
 class PromptCrossAttentionBottleneck(nn.Module):
@@ -2213,7 +2224,7 @@ class ResidualEncoderUNet_Prompt(ResidualEncoderUNet, _PromptMixin):
     """
 
     def __init__(self, *args, prompt_dim: int = 128, n_shared_tokens: int = 8,
-                 case_feature_dim: int = 11, patch_feature_dim: int = 14,
+                 case_feature_dim: int = 11, patch_feature_dim: int = 13,
                  use_patch_prompt: bool = True, eta_init: float = 0.0,
                  network_in_channels: int = None, **kwargs):
         # network_in_channels：覆寫 plans 的輸入通道數。
@@ -2293,7 +2304,7 @@ class ResidualEncoderUNet_DeepConcatPrompt(ResidualEncoderUNet_DeepConcat, _Prom
     """S2 + prompt：vessel4 走 input concat + 每 stage fuse（原樣），另加 prompt 條件化。"""
 
     def __init__(self, *args, prompt_dim: int = 128, n_shared_tokens: int = 8,
-                 case_feature_dim: int = 11, patch_feature_dim: int = 14,
+                 case_feature_dim: int = 11, patch_feature_dim: int = 13,
                  use_patch_prompt: bool = True, eta_init: float = 0.0, **kwargs):
         super().__init__(*args, **kwargs)
         feats = [s.output_channels for s in self.encoder.stages]
@@ -2338,7 +2349,7 @@ class ResidualEncoderUNet_SPADEDecoderPrompt(ResidualEncoderUNet_SPADE, _PromptM
     """S3 + prompt：decoder 每 stage 先 vanilla SPADE（vessel4 空間條件），再套 prompt FiLM。"""
 
     def __init__(self, *args, prompt_dim: int = 128, n_shared_tokens: int = 8,
-                 case_feature_dim: int = 11, patch_feature_dim: int = 14,
+                 case_feature_dim: int = 11, patch_feature_dim: int = 13,
                  use_patch_prompt: bool = True, eta_init: float = 0.0, **kwargs):
         kwargs.setdefault('inject_in_decoder', True)
         kwargs.setdefault('inject_in_encoder', False)

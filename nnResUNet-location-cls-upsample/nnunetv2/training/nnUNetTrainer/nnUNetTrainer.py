@@ -1280,10 +1280,12 @@ class nnUNetTrainer(object):
 
         dl_tr, dl_val = self.get_plain_dataloaders(initial_patch_size, dim)
 
-        allowed_num_processes = get_allowed_n_proc_DA()
+        # ⚠ 本 fork 不使用上游的 get_allowed_n_proc_DA()（即不理會 nnUNet_n_proc_DA），
+        #   固定預設 24。要調整請設 MUTP_NUM_DA_WORKERS（mutp recipe: training.n_proc_DA）。
+        #   多個訓練同機併跑時務必調降：48 核跑 4 個訓練用 24 會有 96 個 worker
+        #   （2× 超額），epoch 時間會隨訓練進行而膨脹。
         allowed_num_processes = 24
         # DDP: worker 數量 × world_size 會爆 FD/pipe/shm，改小避免 dataloader stall
-        # 環境變數 MUTP_NUM_DA_WORKERS 可覆蓋，方便 debug DDP 卡住問題
         import os as _os
         if _os.environ.get('MUTP_NUM_DA_WORKERS'):
             allowed_num_processes = int(_os.environ['MUTP_NUM_DA_WORKERS'])

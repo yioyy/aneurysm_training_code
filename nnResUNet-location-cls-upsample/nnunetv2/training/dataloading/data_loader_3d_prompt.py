@@ -56,6 +56,7 @@ class nnUNetDataLoader3DPrompt(nnUNetDataLoader3D):
         b = len(keys)
         cf = np.zeros((b, N_CASE), dtype=np.float32)
         pf = np.zeros((b, N_PATCH), dtype=np.float32)
+        centers, vshapes = [], []
         for j, k in enumerate(keys):
             if self.case_feature_table is not None:
                 cf[j] = self.case_feature_table.get(k)
@@ -66,9 +67,15 @@ class nnUNetDataLoader3DPrompt(nnUNetDataLoader3D):
                 continue
             lbs, ubs = bboxes[j]
             center = [(lo + hi) // 2 for lo, hi in zip(lbs, ubs)]
-            pf[j] = patch_features(np.rint(data[self.v4_channel]).astype(np.int16),
+            # 直接傳 view，不轉換整卷 —— patch_features 內部只轉鄰域
+            pf[j] = patch_features(data[self.v4_channel],
                                    center, vol_shape=data.shape[1:],
                                    half=self.neighborhood_half)
+            centers.append(center); vshapes.append(list(data.shape[1:]))
         batch["case_feat"] = cf
         batch["patch_feat"] = pf
+        # 供 trainer 第一疊代稽核用：patch 中心與所在 volume 的形狀。
+        # patch_coord 的分母就是這個 volume，第一疊代會印出來讓人對照 CSV 的 crop_half。
+        batch["patch_center"] = np.asarray(centers, dtype=np.int32) if centers else None
+        batch["patch_vol_shape"] = np.asarray(vshapes, dtype=np.int32) if vshapes else None
         return batch

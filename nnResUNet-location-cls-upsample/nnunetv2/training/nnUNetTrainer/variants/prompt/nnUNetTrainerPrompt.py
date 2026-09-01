@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import os
 import pathlib
 
 import numpy as np
@@ -118,7 +119,32 @@ class nnUNetTrainerPrompt(nnUNetTrainer):
         paths = [pathlib.Path(p) for p in self.CASE_FEATURE_CSVS]
         self._case_table = CaseFeatureTable(*paths)
         self.print_to_log_file(f"[prompt] case 特徵表載入 {len(self._case_table)} 個 case")
+        self._register_case_id_aliases()
         return self._case_table
+
+    def _register_case_id_aliases(self):
+        """把 mutp 改名後的 nnunet_id 接回原始 case_id。
+
+        mutp 前處理會改名（`DeepAneurysm_v4_combineFEMH_010000`），特徵 CSV
+        則以原始 case_id 為鍵。少了這一步，dataloader 查表 0/3057 全部落空，
+        `get()` 回零向量而不報錯 —— 模型看起來在訓練，實際上條件化完全沒作用。
+        """
+        import csv as _csv
+        raw = os.environ.get("nnUNet_raw")
+        if not raw:
+            return
+        ds = getattr(self.plans_manager, "dataset_name", None) or ""
+        mp = pathlib.Path(raw) / ds / "case_id_mapping.csv"
+        if not mp.is_file():
+            self.print_to_log_file(f"[prompt] 無 case_id_mapping.csv（{mp}），使用原始鍵")
+            return
+        with open(mp, newline="") as fh:
+            rows = list(_csv.DictReader(fh))
+        m = {r["nnunet_id"]: r["original_case_id"] for r in rows
+             if r.get("nnunet_id") and r.get("original_case_id")}
+        self._id_map = m
+        ok = self._case_table.add_aliases(m)
+        self.print_to_log_file(f"[prompt] case_id_mapping 對照 {ok}/{len(m)} 筆接上原始 case_id")
 
     # ---------- dataloader ----------
     def get_dataloaders(self):
@@ -126,16 +152,45 @@ class nnUNetTrainerPrompt(nnUNetTrainer):
         from nnunetv2.training.dataloading.data_loader_3d_prompt import nnUNetDataLoader3DPrompt
 
         tab = self._ensure_case_table()
+        self._assert_feature_coverage(tab)
         nnUNetDataLoader3DPrompt.case_feature_table = tab
         nnUNetDataLoader3DPrompt.use_patch_features = self.USE_PATCH_FEATURES
         nnUNetDataLoader3DPrompt.v4_channel = self.V4_CHANNEL
         nnUNetDataLoader3DPrompt.neighborhood_half = self.NEIGHBORHOOD_HALF
-        orig = _m3d.nnUNetDataLoader3D
-        _m3d.nnUNetDataLoader3D = nnUNetDataLoader3DPrompt
+        # ⚠ 必須改「nnUNetTrainer 模組」的 global，不能只改來源模組。
+        #   nnUNetTrainer.py 是 `from ...data_loader_3d import nnUNetDataLoader3D`，
+        #   import 當下就把類別綁進自己的命名空間；只改 _m3d 的屬性對它毫無作用，
+        #   結果是 prompt dataloader 從未被使用、batch 裡沒有 case_feat/patch_feat，
+        #   set_prompt(None, None) → 網路補零 → 條件化靜默失效。
+        import nnunetv2.training.nnUNetTrainer.nnUNetTrainer as _mtr
+        saved = [(m, getattr(m, "nnUNetDataLoader3D", None)) for m in (_mtr, _m3d)]
+        for m, _ in saved:
+            m.nnUNetDataLoader3D = nnUNetDataLoader3DPrompt
         try:
             return super().get_dataloaders()
         finally:
-            _m3d.nnUNetDataLoader3D = orig
+            for m, o in saved:
+                if o is not None:
+                    m.nnUNetDataLoader3D = o
+
+    def _assert_feature_coverage(self, tab, min_cov: float = 0.99):
+        """訓練啟動前確認特徵查得到，查不到就中止。
+
+        2026-09-01：四個實驗各跑滿 300 epoch 後才發現查表 0/3057 全落空
+        （nnunet_id 對不上以原始 case_id 為鍵的 CSV），等於整輪都餵零向量。
+        當時的監控探針量的是「有沒有在調制」，而 encoder 光靠 bias 就會產生
+        非零常數，所以看起來一切正常。寧可在這裡炸掉也不要再靜默跑三天。
+        """
+        if tab is None:
+            return
+        tr, val = self.do_split()
+        cov = tab.coverage(list(tr) + list(val))
+        self.print_to_log_file(f"[prompt] 特徵覆蓋率 {cov:.1%}（train {len(tr)} + val {len(val)}）")
+        if cov < min_cov:
+            raise RuntimeError(
+                f"[prompt] 特徵覆蓋率只有 {cov:.1%}（需 ≥{min_cov:.0%}）。"
+                f"查表落空會靜默回零向量、條件化完全失效。"
+                f"請確認 case_id_mapping.csv 是否存在、CSV 的 case_id 是否為原始命名。")
 
     # ---------- 網路 ----------
     def initialize(self):
@@ -146,17 +201,123 @@ class nnUNetTrainerPrompt(nnUNetTrainer):
 
     # ---------- 每步注入 ----------
     def _apply_prompt(self, batch: dict):
+        if not getattr(self, "_batch_checked", False):
+            self._batch_checked = True
+            missing = [k for k in ("case_feat",) if k not in batch]
+            if self.USE_PATCH_FEATURES and "patch_feat" not in batch:
+                missing.append("patch_feat")
+            if missing:
+                raise RuntimeError(
+                    f"[prompt] batch 缺少 {missing} —— prompt dataloader 沒有生效，"
+                    f"特徵不會進入網路（set_prompt 會收到 None，forward 補零向量，"
+                    f"訓練照跑但條件化完全無效）。實際拿到的鍵：{sorted(batch.keys())}")
         cv = batch.get("case_feat")
         pv = batch.get("patch_feat")
         to_t = lambda v: (None if v is None else
                           (v if isinstance(v, torch.Tensor) else torch.from_numpy(np.asarray(v)))
                           .to(self.device, non_blocking=True).float())
         self.network.set_prompt(to_t(cv), to_t(pv) if self.USE_PATCH_FEATURES else None)
+        self._track_feature_spread(cv, pv)
+        self._audit_first_batch(batch)
         if self.NETWORK_IN_CHANNELS is not None:
             d = batch["data"]
             if d.shape[1] > self.NETWORK_IN_CHANNELS:
                 batch = dict(batch, data=d[:, :self.NETWORK_IN_CHANNELS])
         return batch
+
+    def _audit_first_batch(self, batch):
+        """第一疊代把實際餵進網路的特徵印到 log，可直接與 CSV 逐值核對。
+
+        存在的理由：查表落空、鍵對不上、座標框搞錯這幾種錯都不會拋例外，
+        只會安靜地餵零或餵錯。唯一可靠的驗證是把實際跑的那一批印出來對照。
+        """
+        if getattr(self, "_audited", False):
+            return
+        self._audited = True
+        try:
+            import pandas as pd
+            from mutp.data.prompt_features import CASE_COLS, PATCH_COLS, strip_crop_suffix
+            log = self.print_to_log_file
+            # ⚠ 不能寫 `batch.get("keys") or []` —— keys 是 ndarray，
+            #   對它取布林值會拋 "truth value of an array is ambiguous"
+            _k = batch.get("keys")
+            keys = [] if _k is None else list(_k)
+            cf = np.asarray(batch.get("case_feat"))
+            pf = batch.get("patch_feat")
+            pf = None if pf is None else np.asarray(pf)
+            ctr = batch.get("patch_center")
+            vsh = batch.get("patch_vol_shape")
+
+            # 獨立重讀 CSV（不經 CaseFeatureTable），才有對照價值
+            df = pd.concat([pd.read_csv(x) for x in self.CASE_FEATURE_CSVS], ignore_index=True)
+            df = df.drop_duplicates("case_id").set_index("case_id")
+            idmap = getattr(self, "_id_map", {}) or {}
+
+            COV = PATCH_COLS.index("patch_vessel_coverage")
+            log(f"[prompt] ═══ 第一疊代特徵稽核（case {len(CASE_COLS)} 維 / patch {len(PATCH_COLS)} 維）═══")
+            for j in range(min(2, len(keys))):
+                k = keys[j]
+                orig = idmap.get(k, k)
+                log(f"[prompt] 樣本{j}: {k} → {orig}")
+                # 與正式查表同一套解析：先精確、再剝 crop 尾碼
+                ck = orig if orig in df.index else strip_crop_suffix(orig)
+                row = df.loc[ck] if ck in df.index else None
+                if row is None:
+                    log(f"[prompt]   ⚠ CSV 找不到 {orig}（也試過 {strip_crop_suffix(orig)}）"
+                        f" —— 查表落空，特徵是零向量！")
+                else:
+                    csv_v = row[CASE_COLS].to_numpy(dtype=np.float32)
+                    d = float(np.abs(cf[j] - csv_v).max())
+                    log("[prompt]   pipeline: " + " ".join(f"{c}={v:+.4f}" for c, v in zip(CASE_COLS, cf[j])))
+                    log("[prompt]   CSV     : " + " ".join(f"{c}={v:+.4f}" for c, v in zip(CASE_COLS, csv_v)))
+                    log(f"[prompt]   最大絕對差={d:.3e}  {'✓ 一致' if d < 1e-4 else '✗ 不一致'}")
+                if pf is not None and self.USE_PATCH_FEATURES:
+                    c3 = None if ctr is None else np.asarray(ctr)[j]
+                    v3 = None if vsh is None else np.asarray(vsh)[j]
+                    log(f"[prompt]   patch 中心={c3.tolist() if c3 is not None else '?'} "
+                        f"vol_shape={v3.tolist() if v3 is not None else '?'}"
+                        f"（patch_coord 的分母就是這個 volume；已驗證與 CSV 的 crop_half 框等價）")
+                    log("[prompt]   " + " ".join(f"{c}={v:+.4f}" for c, v in zip(PATCH_COLS[:3], pf[j][:3])))
+                    # 索引由欄名推導，維度變動時不會再對不上（14→13 就踩過一次）
+                    dm = [i for i, c in enumerate(PATCH_COLS) if c.startswith("patch_dominant")]
+                    nb = [i for i, c in enumerate(PATCH_COLS) if c.startswith("patch_neighbor")]
+                    log("[prompt]   dominant=" + np.array2string(pf[j][dm], precision=2)
+                        + f" ({','.join(PATCH_COLS[i].split('_')[-1] for i in dm)})")
+                    log("[prompt]   neighbor=" + np.array2string(pf[j][nb], precision=4)
+                        + f" ({','.join(PATCH_COLS[i].split('_')[-1] for i in nb)})"
+                        + f"  vessel_coverage={pf[j][COV]:.4f}")
+            if pf is not None and self.USE_PATCH_FEATURES:
+                log(f"[prompt] 全批 patch: coord 範圍 [{pf[:, :3].min():+.3f}, {pf[:, :3].max():+.3f}]"
+                    f"  vessel_coverage 平均 {pf[:, COV].mean():.4f}"
+                    f"  取樣到血管的比例 {(pf[:, COV] > 0).mean():.1%}"
+                    f"  各維 std 最大/最小 {pf.std(0).max()/max(pf.std(0).min(), 1e-9):.1f}×")
+            log(f"[prompt] 全批 case: 跨樣本 std 平均 {cf.std(0).mean():.4f}"
+                f"（0=每個樣本特徵相同，條件化無效）")
+            log("[prompt] ═══════════════════════════════════")
+        except Exception as ex:
+            self.print_to_log_file(f"[prompt] 稽核輸出失敗（不影響訓練）：{type(ex).__name__}: {ex}")
+
+    def _track_feature_spread(self, cv, pv):
+        """累計「特徵是否隨 case 變化」。
+
+        只量調制強度是不夠的：即使餵進來的是全零，encoder 光靠 bias 也會輸出
+        一個非零常數，探針照樣顯示 attn≈0.45 / film≈0.20，看起來完全正常。
+        真正的判準是**跨 batch 的離散度** —— 全零或常數輸入時 std=0。
+        """
+        acc = getattr(self, "_feat_spread", None)
+        if acc is None:
+            acc = self._feat_spread = {"c_std": 0.0, "c_abs": 0.0, "p_std": 0.0, "n": 0}
+        for v, ks in ((cv, ("c_std", "c_abs")), (pv, ("p_std", None))):
+            if v is None:
+                continue
+            t = v if isinstance(v, torch.Tensor) else torch.from_numpy(np.asarray(v))
+            t = t.detach().float()
+            if t.ndim != 2 or t.shape[0] < 2:
+                continue
+            acc[ks[0]] += float(t.std(dim=0).mean())
+            if ks[1]:
+                acc[ks[1]] += float(t.abs().mean())
+        acc["n"] += 1
 
     def train_step(self, batch: dict) -> dict:
         return super().train_step(self._apply_prompt(batch))
@@ -221,5 +382,14 @@ class nnUNetTrainerPrompt(nnUNetTrainer):
                 f"[prompt] eta={eta:+.5f}  mean|W_film|={gam:.5f}  "
                 f"調制強度 attn={attn_r:.5f} film={film_r:.5f}"
                 f"  (‖Δ‖/‖feat‖；0=無作用)")
+            sp = getattr(self, "_feat_spread", None)
+            if sp and sp["n"]:
+                n = sp["n"]
+                c_std, c_abs, p_std = sp["c_std"] / n, sp["c_abs"] / n, sp["p_std"] / n
+                warn = "  ⚠ case 特徵無變異＝查表落空或常數，條件化等同無效" if c_std < 1e-4 else ""
+                self.print_to_log_file(
+                    f"[prompt] 特徵離散度 case_std={c_std:.4f} case_|x|={c_abs:.4f} "
+                    f"patch_std={p_std:.4f}（跨 batch；0=每個 case 都一樣）{warn}")
+                self._feat_spread = None
         except AttributeError:
             pass
